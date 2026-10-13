@@ -1,0 +1,165 @@
+# Default values for the ProjeQtOr Helm chart.
+# Every value can be overridden with `--set` or a custom values file.
+
+# -- Number of ProjeQtOr pods.
+# NOTE: more than 1 replica requires ReadWriteMany storage for `files/`
+# (attachments and PHP sessions are shared between pods).
+replicaCount: 1
+
+image:
+  # -- Image repository. The GitHub Actions workflow of this project pushes
+  # to ghcr.io/zzhkhyl/projeqtor with tags matching the upstream version
+  # (e.g. 13.1.1) plus `latest`.
+  repository: ghcr.io/zzhkhyl/projeqtor
+  # -- Image tag. Defaults to the chart's appVersion (e.g. "13.1.1").
+  # Use "latest" to always track the newest upstream release.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# -- Secrets used to pull the image from a private registry.
+imagePullSecrets: []
+
+# -- Override the generated release name.
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Create a dedicated service account.
+  create: true
+  # -- Annotations for the service account (e.g. cloud IAM roles).
+  annotations: {}
+  # -- Name of the service account (defaults to the fullname template).
+  name: ""
+
+# -- Non-sensitive configuration, injected as environment variables.
+# The container entrypoint turns these into files/config/parameters.php
+# on first start (an existing file is never overwritten).
+env:
+  # mysql = MySQL/MariaDB, pgsql = PostgreSQL
+  PQ_DB_TYPE: mysql
+  PQ_DB_HOST: projeqtor-mysql
+  PQ_DB_PORT: "3306"
+  PQ_DB_NAME: projeqtor
+  PQ_DB_USER: projeqtor
+  # Container timezone (ProjeQtOr also has its own timezone parameter).
+  TZ: UTC
+
+database:
+  # -- Database password, stored in a chart-managed Secret.
+  # Leave empty to not create a Secret (the entrypoint then writes an empty
+  # password - only sensible with a password-less local database).
+  password: ""
+  # -- Use an existing secret instead of a chart-managed one.
+  existingSecret: ""
+  # -- Key inside existingSecret holding the password.
+  existingSecretKey: PQ_DB_PASSWORD
+
+# -- Optional: mount a complete custom parameters.php over the generated one.
+# Useful for advanced setups (SSO, proxies, custom paths, ...).
+parameters:
+  # Set to true to actually mount parameters.content.
+  mount: false
+  # Full PHP content of the parameters file. Must define at least
+  # $paramDbType/$paramDbHost/$paramDbPort/$paramDbName/$paramDbUser/$paramDbPassword.
+  content: ""
+
+# -- Additional environment variables for the container (list of
+# {name, value} or {name, valueFrom} objects).
+extraEnv: []
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+ingress:
+  enabled: false
+  # -- Ingress class name (e.g. "nginx", "traefik"). Leave empty for the
+  # cluster default ingress class.
+  className: ""
+  # -- Ingress annotations, e.g. for cert-manager:
+  #   cert-manager.io/cluster-issuer: letsencrypt-prod
+  annotations: {}
+  hosts:
+    - host: projeqtor.local
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- TLS configuration, e.g.:
+  # tls:
+  #   - secretName: projeqtor-tls
+  #     hosts:
+  #       - projeqtor.local
+  tls: []
+
+persistence:
+  # -- Store files/ (attachments, logs, generated parameters.php) on a PVC.
+  enabled: true
+  # -- Use an existing PVC instead of creating one.
+  existingClaim: ""
+  # -- Storage class (empty = cluster default).
+  storageClassName: ""
+  # -- Access modes. Multiple replicas need ReadWriteMany (NFS, CephFS, ...).
+  accessModes:
+    - ReadWriteMany
+  size: 10Gi
+
+# -- Resource requests/limits for the ProjeQtOr container.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+# -- Pod-level security context.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 33      # www-data
+  runAsGroup: 33
+  fsGroup: 33
+
+# -- Container-level security context.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+# -- Liveness/readiness probe timings (both hit /healthz.php).
+probes:
+  liveness:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+
+# -- Deployment strategy.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
+# -- Scheduling constraints.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+
+# -- Optional keep-alive for the ProjeQtOr cron (background tasks).
+# The cron itself must be started once from the administration UI; this
+# CronJob relaunches it after pod restarts via tool/cronRelaunch.php.
+cronJob:
+  enabled: false
+  schedule: "*/5 * * * *"
+  image: alpine:3.20
+  protocol: http

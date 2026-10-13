@@ -1,0 +1,178 @@
+name: Build and Push Docker Image
+
+# 触发条件：
+#   schedule           每日自动检查 SourceForge 上的 ProjeQtOr 新版本（仅在有新版本时构建）
+#   push (main)        仓库内容（Dockerfile / 工作流）变更时重建并更新 latest
+#   pull_request       仅构建验证，不登录、不推送镜像
+#   workflow_dispatch  手动构建，可指定版本号或强制重建
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'ProjeQtOr version to build (empty = auto-detect latest from SourceForge)'
+        required: false
+        default: ''
+      force:
+        description: 'Force build (even if the tag already exists in ghcr)'
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: zzhkhyl/projeqtor
+  PLATFORMS: linux/amd64,linux/arm64
+  SOURCEFORGE_PROJECT: projectorria
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Detect the latest upstream version and decide whether a build is needed
+  # ---------------------------------------------------------------------------
+  detect:
+    name: Detect ProjeQtOr version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      is_latest: ${{ steps.detect.outputs.is_latest }}
+      should_build: ${{ steps.detect.outputs.should_build }}
+    steps:
+      - name: Resolve version and check existing tags
+        id: detect
+        env:
+          VERSION_INPUT: ${{ inputs.version || '' }}
+          FORCE_INPUT: ${{ inputs.force || false }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          LATEST_URL="https://sourceforge.net/projects/${SOURCEFORGE_PROJECT}/files/latest/download"
+          TAGS_URL="https://${REGISTRY}/v2/${IMAGE_NAME}/tags/list"
+          TOKEN_URL="https://${REGISTRY}/token?scope=repository:${IMAGE_NAME}:pull&service=${REGISTRY}"
+
+          # ---- Check whether a version tag already exists in ghcr -------------
+          # Fails open: on any API error we build (never miss a new release).
+          tag_exists() {
+            local version="$1" token http_code
+            token=$(curl -s --max-time 20 -u "${GITHUB_ACTOR}:${GITHUB_TOKEN}" "$TOKEN_URL" \
+                    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+            if [ -z "$token" ]; then
+              echo "::warning::ghcr token request failed - assuming the image does not exist"
+              return 1
+            fi
+            http_code=$(curl -s --max-time 20 -o /tmp/tags.json -w '%{http_code}' \
+                    -H "Authorization: Bearer $token" "$TAGS_URL")
+            if [ "$http_code" != "200" ]; then
+              echo "::warning::ghcr tags API returned HTTP $http_code - assuming the image does not exist"
+              return 1
+            fi
+            grep -q "\"${version}\"" /tmp/tags.json
+          }
+
+          # ---- 1. Extract the latest version from the SourceForge redirect ----
+          # curl -sI .../files/latest/download  ->  302
+          #   location: https://downloads.sourceforge.net/.../projeqtorV13.1.1.zip?...
+          detect_latest() {
+            local location file
+            location=$(curl -sI --max-time 30 "$LATEST_URL" \
+                    | grep -i '^location:' | tr -d '\r' | awk '{print $2}')
+            if [ -z "$location" ]; then
+              return 1
+            fi
+            file=$(basename "${location%%\?*}")
+            echo "$file" | sed -nE 's/^projeqtorV([0-9]+\.[0-9]+\.[0-9]+)\.zip$/\1/p'
+          }
+
+          LATEST=$(detect_latest || true)
+          if [ -z "$LATEST" ]; then
+            echo "::error::Unable to detect the latest ProjeQtOr version from SourceForge"
+            exit 1
+          fi
+          echo "Latest upstream version: ${LATEST}"
+
+          # ---- 2. Version to build: manual input wins, else upstream latest ---
+          if [ -n "$VERSION_INPUT" ]; then
+            VERSION="$VERSION_INPUT"
+          else
+            VERSION="$LATEST"
+          fi
+          if [ "$VERSION" = "$LATEST" ]; then IS_LATEST=true; else IS_LATEST=false; fi
+
+          # ---- 3. Skip when the image already exists (schedule / dispatch) ----
+          SHOULD_BUILD=true
+          case "$GITHUB_EVENT_NAME" in
+            schedule|workflow_dispatch)
+              if [ "$FORCE_INPUT" != "true" ] && tag_exists "$VERSION"; then
+                SHOULD_BUILD=false
+                echo "Image ${REGISTRY}/${IMAGE_NAME}:${VERSION} already exists - skipping build"
+              fi
+              ;;
+          esac
+
+          echo "version=${VERSION}"       >> "$GITHUB_OUTPUT"
+          echo "is_latest=${IS_LATEST}"   >> "$GITHUB_OUTPUT"
+          echo "should_build=${SHOULD_BUILD}" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Multi-arch build and push (PRs only build, never log in or push)
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build and push
+    runs-on: ubuntu-latest
+    needs: detect
+    if: ${{ needs.detect.outputs.should_build == 'true' }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
+          tags: |
+            # Image tag strictly follows the upstream ProjeQtOr version, e.g. 13.1.1
+            type=raw,value=${{ needs.detect.outputs.version }}
+            # Additionally tag "latest" when building the upstream latest version
+            type=raw,value=latest,enable=${{ needs.detect.outputs.is_latest == 'true' }}
+            # Rebuilds of the same version stay traceable via the commit sha
+            type=sha,format=short,prefix=sha-
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          build-args: |
+            PROJEQTOR_VERSION=${{ needs.detect.outputs.version }}
+          # PRs only build amd64 to save CI time
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || env.PLATFORMS }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false

@@ -1,0 +1,47 @@
+{{- if .Values.cronJob.enabled }}
+# Keep-alive for the ProjeQtOr cron (background tasks: alerts, notifications,
+# automatic calculations). The cron itself must be started once from the
+# administration UI; this CronJob relaunches it after a pod restart by calling
+# tool/cronRelaunch.php (Cron::relaunch()).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "projeqtor.fullname" . }}-cron
+  labels:
+    {{- include "projeqtor.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronJob.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "projeqtor.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: cron
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: cron-relaunch
+              image: {{ .Values.cronJob.image | default "alpine:3.20" | quote }}
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  URL="{{ .Values.cronJob.protocol | default "http" }}://{{ include "projeqtor.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/tool/cronRelaunch.php"
+                  echo "Requesting ${URL}"
+                  wget -q -O /dev/null --timeout=60 "${URL}" \
+                    || echo "cronRelaunch request failed (cron may still be healthy)"
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 65534
+                runAsGroup: 65534
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+                readOnlyRootFilesystem: true
+{{- end }}

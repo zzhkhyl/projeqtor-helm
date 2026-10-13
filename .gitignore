@@ -1,0 +1,5 @@
+# Local reference copy of the ProjeQtOr source code (kept for development
+# only - the Docker image downloads the release from SourceForge at build
+# time, so this directory must never be committed).
+/projeqtor/
+.codebuddy/

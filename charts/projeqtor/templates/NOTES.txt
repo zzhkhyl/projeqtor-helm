@@ -1,0 +1,40 @@
+ProjeQtOr {{ .Chart.AppVersion }} has been deployed as release "{{ .Release.Name }}".
+
+1. Access the application
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+   http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+   kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "projeqtor.fullname" . }} 8080:{{ .Values.service.port }}
+   Then open http://localhost:8080
+{{- end }}
+
+2. Database configuration
+   The database connection is injected through the PQ_DB_* environment
+   variables (ConfigMap {{ include "projeqtor.configMapName" . }}) and written to
+   files/config/parameters.php on first start. Current settings:
+     type={{ .Values.env.PQ_DB_TYPE | default "mysql" }} host={{ .Values.env.PQ_DB_HOST }}
+     port={{ .Values.env.PQ_DB_PORT | default "3306" }} database={{ .Values.env.PQ_DB_NAME | default "projeqtor" }}
+     user={{ .Values.env.PQ_DB_USER | default "projeqtor" }}
+   Default login after installation: admin / admin (change it immediately!)
+
+3. Background tasks (cron)
+   Start the cron once from the administration UI (Administration > cron).
+{{- if .Values.cronJob.enabled }}
+   The CronJob {{ include "projeqtor.fullname" . }}-cron relaunches it after pod restarts.
+{{- else }}
+   Tip: set cronJob.enabled=true to relaunch the cron automatically after
+   pod restarts.
+{{- end }}
+
+4. Persistence
+{{- if .Values.persistence.enabled }}
+   Attachments, logs and the generated parameters.php are stored on PVC
+   {{ .Values.persistence.existingClaim | default (printf "%s-files" (include "projeqtor.fullname" .)) }}.
+   With more than one replica, ReadWriteMany storage is required
+   (attachments and PHP sessions are shared between pods).
+{{- else }}
+   Persistence is disabled: attachments, logs and the generated
+   parameters.php are lost when the pod restarts (emptyDir).
+{{- end }}

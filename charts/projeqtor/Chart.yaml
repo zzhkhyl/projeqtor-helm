@@ -1,0 +1,23 @@
+apiVersion: v2
+name: projeqtor
+description: A Helm chart to deploy ProjeQtOr collaborative project management software on Kubernetes
+type: application
+
+# Chart version - bump on every change to this chart
+version: 0.1.0
+
+# ProjeQtOr application version (default image tag).
+# Keep in sync with the latest upstream release, or set image.tag explicitly.
+appVersion: "13.1.1"
+
+keywords:
+  - projeqtor
+  - project-management
+  - php
+  - apache
+
+home: https://www.projeqtor.org
+sources:
+  - https://github.com/zzhkhyl/projeqtor-helm
+maintainers:
+  - name: zzhkhyl

@@ -1,0 +1,10 @@
+# Local reference source (the image downloads it from SourceForge at build time)
+projeqtor/
+
+# Repository metadata not needed inside the build context
+.git/
+.github/
+charts/
+*.md
+.dockerignore
+.gitignore
