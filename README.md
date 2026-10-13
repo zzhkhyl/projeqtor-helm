@@ -106,3 +106,13 @@ Helm Chart 提供可选的 CronJob（`cronJob.enabled=true`），在 Pod 重启�
 
 `files/`（附件、日志、PHP session）在 Pod 间共享，副本数 > 1 时必须使用
 `ReadWriteMany` 存储（`persistence.accessModes`）。
+
+## 开源协议
+
+- **本仓库代码**（GitHub Actions 工作流、Dockerfile、入口脚本、Helm Chart
+  及文档）采用 [MIT License](LICENSE)，Copyright (c) 2026 zhihao.wang。
+- **ProjeQtOr 本体**采用 [GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html)（AGPL-3.0）。
+  通过本仓库构建的 Docker 镜像包含 ProjeQtOr 代码，因此**镜像整体受
+  ProjeQtOr 的 AGPL-3.0 协议约束**（镜像 OCI label 亦标注为
+  `AGPL-3.0-only`）；部署、分发或二次分发该镜像时请遵守 AGPL-3.0 的要求
+  （包括向使用者提供获取完整对应源码的途径）。
