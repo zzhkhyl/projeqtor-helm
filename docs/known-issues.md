@@ -371,7 +371,7 @@ ProjeQtOr 的用户（含 `admin`）存于 **`resource`** 表，数据库中**�
 Deployment / Service / Ingress / ServiceAccount / 应用侧 PVC（外加可选的 Secret 与
 CronJob）；模板中的 `image:` 只有两处 —— 应用镜像（`deployment.yaml`）与 CronJob 保活
 用的 `alpine:3.20`（`cronjob.yaml`），**没有**任何 PG/MySQL 镜像。本集群的
-`projeqtor-postgres`（镜像 `<私有镜像仓库>/library/postgres:17.10-bookworm`，
+`projeqtor-postgres`（镜像来自私有镜像仓库的 `postgres:17.10-bookworm`，
 PVC `projeqtor-postgres-data`）是独立 `kubectl apply` 创建的：无 Helm 标签、无
 `ownerReferences`，不属于 release。
 
