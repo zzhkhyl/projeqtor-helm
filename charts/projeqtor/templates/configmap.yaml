@@ -5,14 +5,14 @@ metadata:
   labels:
     {{- include "projeqtor.labels" . | nindent 4 }}
 data:
-  # Database connection (non-sensitive). The container entrypoint turns these
-  # values into files/config/parameters.php on first start.
-  PQ_DB_TYPE: {{ .Values.env.PQ_DB_TYPE | default "mysql" | quote }}
-  PQ_DB_HOST: {{ .Values.env.PQ_DB_HOST | quote }}
-  PQ_DB_PORT: {{ .Values.env.PQ_DB_PORT | default "3306" | quote }}
-  PQ_DB_NAME: {{ .Values.env.PQ_DB_NAME | default "projeqtor" | quote }}
-  PQ_DB_USER: {{ .Values.env.PQ_DB_USER | default "projeqtor" | quote }}
-  TZ: {{ .Values.env.TZ | default "UTC" | quote }}
+  # Every key under `env` in values.yaml is injected into the container as an
+  # environment variable, so adding a key there is enough - no template change
+  # needed. The PQ_DB_* keys are also turned into files/config/parameters.php by
+  # the container entrypoint on first start; the other keys (TZ, PQ_PG_REPAIR, …)
+  # are plain container environment variables.
+  {{- range $key, $value := .Values.env }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
 {{- if .Values.parameters.content }}
   # Optional: complete custom parameters.php, mounted over the generated one
   # (see parameters.mount in values.yaml).

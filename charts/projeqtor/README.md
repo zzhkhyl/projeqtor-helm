@@ -76,6 +76,7 @@ kubectl -n projeqtor delete pvc projeqtor-files
 | `env.PQ_DB_NAME` | 数据库名 | `projeqtor` |
 | `env.PQ_DB_USER` | 数据库用户 | `projeqtor` |
 | `env.TZ` | 容器时区 | `UTC` |
+| `env.PQ_PG_REPAIR` | PostgreSQL 启动数据自愈（幂等、非致命，见 [docs/known-issues.md](../../docs/known-issues.md) P1） | `"true"` |
 | `database.password` | 数据库密码（chart 托管 Secret） | `""` |
 | `database.existingSecret` | 使用已有 Secret 名 | `""` |
 | `database.existingSecretKey` | 已有 Secret 中的 key | `PQ_DB_PASSWORD` |

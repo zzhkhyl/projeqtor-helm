@@ -1,7 +1,8 @@
 # 已知问题与验证记录
 
 本文件记录 ProjeQtOr 容器化交付方案在真机验证过程中识别出的全部问题、证据与处置状态，
-用于后续查阅与跟踪。新增问题请沿用本文编号规则（`P` = 产品/上游缺陷，`N` = 排查注意事项）。
+用于后续查阅与跟踪。新增问题请沿用本文编号规则（`P` = 需处置的缺陷（上游或本仓库交付侧），
+`N` = 排查注意事项）。
 
 | 项目 | 基线 |
 |---|---|
@@ -11,7 +12,7 @@
 | 命名空间 | `projeqtor` |
 | 报告日期 | 2026-10-14 |
 
-状态图例：🔴 未处理 · 🟡 已定位待处置 · 🟢 已验证无问题 · ⚪ 说明性记录
+状态图例：🔴 未处理 · 🟡 已定位待处置 · 🟢 已缓解/已验证 · ⚪ 说明性记录
 
 ---
 
@@ -19,15 +20,17 @@
 
 | 编号 | 问题 | 类别 | 严重度 | 影响范围 | 状态 |
 |---|---|---|---|---|---|
-| [P1](#p1--postgresql-下-v1301-升级脚本执行失败) | PostgreSQL 下 `V13.0.1` 升级脚本 3 条语句执行失败（MySQL 专有多表 `UPDATE`） | 上游缺陷 | 中 | 任意 PG 实例从 ≤13.0.0 升级到 ≥13.0.1 | 🟡 |
+| [P1](#p1--postgresql-下-v1301-升级脚本执行失败) | PostgreSQL 下 `V13.0.1` 升级脚本 3 条语句执行失败（MySQL 专有多表 `UPDATE`） | 上游缺陷 | 中 | 从 ≤13.0.0 升级且已有 `subtask` 数据的 PG 实例 | 🟢 已缓解 |
 | [P2](#p2--缺少-user-agent-时请求被中断) | 缺失 `User-Agent` 的请求被应用错误处理器中断 | 上游缺陷 | 低 | 无头 HTTP 客户端（不含浏览器、不含本 Chart 探针） | 🟡 |
+| [P3](#p3--可变版本-tag--ifnotpresent导致镜像更新不生效) | 可变版本 tag + `IfNotPresent`，导致镜像变更不会落到既有部署 | 交付侧 | 中 | 所有已部署实例在镜像重建后的升级 | 🟡 |
 | [N1](#n1--aes-加密类脱离框架不可用) | AES 加密类依赖 `pq_ord()` / `pq_substr()`，脱离框架无法直接调用 | 排查注意 | — | 仅影响外部调试脚本 | ⚪ |
 | [N2](#n2--session-激活后无法再改-session-id) | `session_start()` 之后再调 `session_id()` 会报错 | 排查注意 | — | 仅影响外部调试脚本 | ⚪ |
 | [N3](#n3--用户表名为-resource-而非-user) | 用户数据存于 `resource` 表，不存在 `user` 表 | 排查注意 | — | 仅影响 SQL 排查 | ⚪ |
 
 **总体结论**：本次部署**功能正常**（全新安装、数据库升级、`admin/admin` 真实 HTTP 登录均验证通过），
-未发现由本仓库的 Helm Chart 或镜像构建引入的缺陷。P1、P2 均来自上游 ProjeQtOr 自身，
-且**均不阻断部署、启动与日常使用**。
+未发现由本仓库的 Helm Chart 或镜像构建引入的功能性缺陷。P1、P2 来自上游 ProjeQtOr 自身且都不阻断
+部署与使用；P1 已在本仓库侧提供幂等自愈缓解（见 P1「处置记录」）。P3 是交付侧的升级生效性问题，
+不修复也不影响当前实例运行，但会让「重建镜像」的操作看起来无效。
 
 ---
 
@@ -45,6 +48,8 @@
 | 登录 | `admin/admin` 经真实 HTTP 全链路登录成功（见 [第 4 节](#4-登录验证方法可复现)） |
 | 源码完整性 | 容器内 `tool/projeqtor.php`、`tool/getHash.php`、`tool/loginCheck.php`、`view/login.php`、`model/UserMain.php`、`model/Audit.php` 的 md5 与官方源码完全一致，无调试补丁残留 |
 | 服务暴露 | Service `projeqtor:8080`（ClusterIP）；Ingress `<应用域名>`（traefik，80/443） |
+| P1 数据回填 | 等价 PG 语句在真实库执行成功（`UPDATE 0` × 3 + `COMMIT`）；另在可回滚的隔离 schema 中验证语义正确（见 P1「处置记录」） |
+| P1 自愈脚本 | `docker/pg-repair-subtask-idproject.php` 6 个用例全部通过（真实库幂等、修复生效、3 类异常路径均 exit 0） |
 
 ---
 
@@ -54,7 +59,7 @@
 
 **严重度**：中（数据一致性偏差；不阻断升级与使用）
 **归属**：上游 ProjeQtOr 缺陷（脚本方言 + 补丁缺失）
-**状态**：🟡 已定位，未修复
+**状态**：🟢 已缓解（上游缺陷仍在；本仓库已提供幂等自愈 + 已完成本实例数据回填）
 
 #### 现象
 
@@ -100,22 +105,62 @@ UPDATE `${prefix}subtask` s left join `${prefix}ticket` t on s.refType='Ticket' 
 
 * **不阻断**：单条语句失败仅计错误数并回滚，随后继续（`db/maintenanceFunctions.php:72`），
   升级版本号照常推进至 `V13.1.1`，应用可正常启动与登录。
-* **实际损失**：这三条语句本应把 `subtask.idProject` 与所属 UserStory / Activity / Ticket 的
-  `idProject` 对齐。PG 实例上该回填**未执行**，`subtask.idProject` 可能残留与父对象不一致的值，
-  属潜伏的数据一致性偏差。
+* **数据损失范围**：这三条语句本应把 `subtask.idProject` 与所属 UserStory / Activity / Ticket 的
+  `idProject` 对齐。该回填在 PG 上**未执行**，`subtask.idProject` 可能残留与父对象不一致的值。
+* **本实例实际影响为 0 行**：本实例是全新安装，`subtask` 表为空（0 行），无数据需要修正。
+  风险只存在于「从 ≤13.0.0 升级、且升级前已存在 `subtask` 数据」的 PG 实例。
 
-#### 建议处置（三选一，尚未决定）
+#### 处置记录
 
-1. 在 PG 实例上手动执行一次等价语句（一次性数据修复）：
+**① 本实例数据回填（已完成，2026-10-14）**
 
-   ```sql
-   UPDATE subtask s SET idProject = a.idProject FROM userstory a WHERE s.refType='UserStory' AND s.refId=a.id AND s.idProject <> a.idProject;
-   UPDATE subtask s SET idProject = a.idProject FROM activity  a WHERE s.refType='Activity'  AND s.refId=a.id AND s.idProject <> a.idProject;
-   UPDATE subtask s SET idProject = t.idProject FROM ticket    t WHERE s.refType='Ticket'    AND s.refId=t.id AND s.idProject <> t.idProject;
-   ```
+* 在真实 PG 实例执行等价语句：`UPDATE 0` × 3 → `COMMIT`（前后「与父对象不一致的行数」均为 0，
+  与「全新安装、无数据」的结论一致）。
+* 语义与边界验证（可回滚，零残留）：在隔离 schema 中造 4 行数据后执行同一组语句：
 
-2. 在镜像 / entrypoint 侧增加一次幂等的启动自愈（可随 Chart 交付，属主动修改上游数据，需评估）。
-3. 仅记录为已知上游缺陷，并向 ProjeQtOr 上游反馈（任何 PG 用户从 ≤13.0.0 升级都会命中）。
+  ```text
+  BEFORE : 1|UserStory|10|999   2|Activity|20|999   3|Ticket|30|400   4|UserStory|77|555
+  UPDATE 1 / UPDATE 1 / UPDATE 0
+  AFTER  : 1|UserStory|10|100   2|Activity|20|300   3|Ticket|30|400   4|UserStory|77|555
+  立即重跑：UPDATE 0 × 3（幂等）
+  ROLLBACK → 临时 schema 未保留
+  ```
+
+  结论：不一致行被正确修正；已一致行与孤立行（父对象不存在）保持不动，与上游 MySQL 语义一致。
+
+**② 幂等启动自愈（已完成，2026-10-14）**
+
+* 新增 `docker/pg-repair-subtask-idproject.php`：上述等价语句的 PG 实现。
+* 接线：`docker/Dockerfile` 将其安装为 `/usr/local/bin/projeqtor-pg-repair.php`
+  （**刻意放在 web 根目录之外**，避免出现可写数据库的未授权 HTTP 端点）；
+  `docker/docker-entrypoint.sh` 在 Apache 启动前调用（步骤 4，非致命）。
+* 开关：`PQ_PG_REPAIR`（默认 `true`，设为 `false` 关闭）。已登记到根 README 环境变量表、
+  chart README 参数表与 `values.yaml` 的 `env` 注释，并确认经 ConfigMap `envFrom` 注入容器。
+* 顺带修复：`charts/projeqtor/templates/configmap.yaml` 原先只硬编码渲染 6 个固定键，
+  导致 `values.yaml` 中 `env` 下的其它键（含新增的 `PQ_PG_REPAIR`，以及 README 中提到的
+  `PQ_DB_PREFIX`）**静默失效**；现改为遍历 `.Values.env` 全量渲染，与 values.yaml 的注释一致
+  （已用 `helm lint` / `helm template --set env.PQ_PG_REPAIR=false` 校验）。
+* 设计约束：仅当 `PQ_DB_TYPE=pgsql` 时生效；只发 `UPDATE`，不创建/修改/删除任何对象；
+  配置缺失、类型不符、数据库不可达、表尚未建立等情形一律告警并 `exit 0`，绝不影响容器启动。
+
+验证矩阵（在真实 Pod 内、对真实数据库执行）：
+
+| 用例 | 条件 | 期望 | 实测 |
+|---|---|---|---|
+| T1 | 真实配置，数据已一致 | nothing to repair | ✅ 三条 `0 row(s)` + `nothing to repair`，exit 0 |
+| T2 | `paramDbType=mysql` | skipped | ✅ `skipped (PostgreSQL only)`，exit 0 |
+| T3 | 目标库中无相关表 | skipped | ✅ `table(s) not created yet (...) - skipped`，exit 0 |
+| T4 | 数据库不可达 | 告警 + skipped | ✅ `WARNING: cannot connect ... - skipped`，exit 0 |
+| T5 | 隔离 schema 含 2 行不一致 | 修复 2 行 | ✅ `UserStory 1 + Activity 1 + Ticket 0` = `2 row(s) realigned` |
+| T6 | 紧接 T5 再次执行 | 幂等 0 行 | ✅ `nothing to repair` |
+
+**③ 上游反馈（建议，未执行）**
+
+向 ProjeQtOr 上游反馈：`db/projeqtor_V13.0.1.sql` 使用 MySQL 专有多表 `UPDATE`，
+且该版本未提供 PG 补丁（对比 13.0.0 有 `projeqtor_V13.0.0.psql.sql`）。
+
+> **生效前提**：自愈逻辑位于镜像内，需等 CI 用新代码重建镜像（push `main` 即触发）后才会进入运行实例；
+> 且受 [P3](#p3--可变版本-tag--ifnotpresent导致镜像更新不生效) 影响，既有部署不会自动拉到新镜像。
 
 > 补充：该缺口的破坏面是「PG 转换器未覆盖的语法」这一类，而非 PG 整体不可用。
 > 实测中最新两个版本的脚本在 PG 上零错误。另一侧的事实是：MySQL 路径下
@@ -163,6 +208,42 @@ PHP 8 将其视为 warning，而应用启用的错误捕获会把该 warning 升
 
 无需修改 Chart。若后续要做合成登录检查或 E2E 用例，请务必携带浏览器请求头；
 如需根治，可向上游反馈 `Audit.php:160` 增加存在性判断。
+
+---
+
+### P3 · 可变版本 tag + `IfNotPresent`，导致镜像更新不生效
+
+**严重度**：中（不影响实例运行，但会让「重建镜像」的操作看起来无效）
+**归属**：本仓库交付设计（CI 标签策略 × Chart 拉取策略相互作用）
+**状态**：🟡 已定位，待决定
+
+#### 现象
+
+CI 对 `push` 到 `main` 的事件**不做**「tag 已存在则跳过」判断，即每次仓库（含 Dockerfile）变更都会
+重建并推送同名版本 tag（如 `13.1.1`），版本 tag 实质是**可变**的；而 Chart 默认
+`image.pullPolicy: IfNotPresent`。当节点已缓存同名 tag 的镜像时，即使远端已被新内容覆盖，
+Pod 重建也不会拉取新镜像 —— 镜像变更静默不生效。
+
+**本实例即为此情形**：Dockerfile / entrypoint 已加入 P1 自愈逻辑，但部署中的 `13.1.1`
+仍是加入该逻辑之前的构建。
+
+#### 证据
+
+* `.github/workflows/docker-image.yml`：去重分支仅覆盖 `schedule|workflow_dispatch`
+  （`case "$GITHUB_EVENT_NAME" in schedule|workflow_dispatch)`），push 事件必然构建并推送；
+  标签规则为 `type=raw,value=<版本号>`、`latest`（仅上游最新版）、`type=sha,format=short,prefix=sha-`。
+* `charts/projeqtor/values.yaml`：`image.pullPolicy: IfNotPresent`。
+
+#### 影响
+
+* 既有部署执行 `helm upgrade` 或 Pod 重建后，仍运行旧镜像内容（本次的自愈逻辑就是这种情况）。
+* `sha-<7位>` 标签每次不同且可追溯到 commit，但当前未作为部署依据使用。
+
+#### 建议处置（三选一，待决定）
+
+1. 部署时固定不可变标签：`--set image.tag=sha-<commit>`（每次升级显式变更 tag）。
+2. 改用 `--set image.pullPolicy=Always`（代价：每次启动回源校验，弱网/离线环境不利）。
+3. CI 侧：对已发布的版本号 tag 不覆盖（push 事件同样做存在性判断，只推 `sha-` 标签）。
 
 ---
 
@@ -239,6 +320,10 @@ RESULT: LOGIN SUCCESS (admin/admin)
 * **查询数据库版本**：`select parametercode, parametervalue from parameter where parametercode='dbVersion'` → `V13.1.1`。
 * **日志位置**：容器内 `/var/www/html/files/logs/projeqtor_<YYYYMMDD>.log`；
   升级错误用 `grep -E "WITH [0-9]+ ERROR|ERROR \*+"` 定位。
+* **查看自愈脚本运行情况**：`kubectl -n projeqtor logs <pod> -c projeqtor | grep projeqtor-pg-repair`
+  （正常启动时打印三条 `N row(s) realigned` 与最终结论）。
+* **确认镜像是否真的更新**：比对 `kubectl -n projeqtor get pod -o jsonpath='{.status.containerStatuses[0].imageID}'`
+  与 ghcr 上该 tag 的 digest；注意 [P3](#p3--可变版本-tag--ifnotpresent导致镜像更新不生效)。
 
 ---
 
@@ -246,11 +331,13 @@ RESULT: LOGIN SUCCESS (admin/admin)
 
 | # | 事项 | 关联 | 状态 |
 |---|---|---|---|
-| 1 | PG 实例上是否手动回填 `subtask.idProject`（等价语句见 P1） | P1 | 待决定 |
-| 2 | 是否在镜像 / entrypoint 侧增加幂等自愈逻辑并随 Chart 交付 | P1 | 待决定 |
+| 1 | PG 实例上回填 `subtask.idProject` | P1 | ✅ 已完成（2026-10-14；本实例无数据，已在隔离 schema 验证语义） |
+| 2 | 镜像 / entrypoint 侧幂等自愈并随 Chart 交付 | P1 | ✅ 已完成（脚本 + 接线 + 开关 + 文档；6 用例验证通过） |
 | 3 | 是否向 ProjeQtOr 上游反馈 `V13.0.1` 脚本方言与缺失 PG 补丁 | P1 | 待决定 |
 | 4 | 是否反馈 `Audit.php:160` 缺少 `HTTP_USER_AGENT` 判断 | P2 | 待决定 |
 | 5 | 是否用 MySQL/MariaDB 做一次对照实测（同一套 Chart、同样全新安装，检查 `WITH N ERRORS`） | P1 | 待决定 |
+| 6 | 让自愈逻辑真正生效：等 CI 用新代码重建镜像并完成滚动更新（受 P3 影响） | P1 / P3 | 待决定 |
+| 7 | 选择 P3 的处置方式（不可变 tag / `Always` / CI 不覆盖版本 tag） | P3 | 待决定 |
 
 ---
 
@@ -259,3 +346,4 @@ RESULT: LOGIN SUCCESS (admin/admin)
 | 日期 | 变更 |
 |---|---|
 | 2026-10-14 | 首次建立：记录 P1、P2 与 N1–N3，附部署与登录验证基线 |
+| 2026-10-14 | 执行 P1 处置：本实例数据回填（0 行）+ 新增幂等启动自愈脚本 `PQ_PG_REPAIR`（6 用例验证通过）；新增 P3（可变版本 tag + `IfNotPresent`）；修复 `configmap.yaml` 仅渲染固定 env 键导致新增键静默失效的问题；补全验证矩阵与生效前提 |

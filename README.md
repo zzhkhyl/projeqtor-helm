@@ -93,6 +93,7 @@ docker run -d -p 8080:8080 \
 | `PQ_DB_PASSWORD` | 数据库密码 | 空 |
 | `PQ_DB_PREFIX` | 表前缀 | 空 |
 | `TZ` | 容器时区 | `UTC` |
+| `PQ_PG_REPAIR` | PostgreSQL 启动数据自愈开关（幂等、非致命，见 [docs/known-issues.md](docs/known-issues.md) P1） | `true` |
 
 未设置 `PQ_DB_HOST` 时，首次访问会进入 ProjeQtOr 自带的 Web 安装向导。
 

@@ -43,6 +43,11 @@ env:
   PQ_DB_USER: projeqtor
   # Container timezone (ProjeQtOr also has its own timezone parameter).
   TZ: UTC
+  # PostgreSQL startup data repair: realigns subtask.idProject with its parent
+  # object. Workaround for an upstream defect in the ProjeQtOr V13.0.1 upgrade
+  # script (see docs/known-issues.md, issue P1). Idempotent and non-fatal:
+  # it runs only for PQ_DB_TYPE=pgsql and never blocks startup.
+  PQ_PG_REPAIR: "true"
 
 database:
   # -- Database password, stored in a chart-managed Secret.

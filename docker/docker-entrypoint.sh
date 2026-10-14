@@ -10,7 +10,10 @@
 #      overwritten, so `helm upgrade` keeps a working configuration.
 #   3. Create tool/parametersLocation.php pointing to the parameters file
 #      (same file the web installer would create).
-#   4. Hand over to the container command (apache2-foreground).
+#   4. Run the PostgreSQL startup data repair, a workaround for an upstream
+#      defect in the V13.0.1 upgrade script (see docs/known-issues.md, P1).
+#      Idempotent and non-fatal: disable with PQ_PG_REPAIR=false.
+#   5. Hand over to the container command (apache2-foreground).
 #
 # The generated file uses the exact variable names read by ProjeQtOr
 # (Parameter::getGlobalParameter() reads the same-named PHP globals).
@@ -67,5 +70,14 @@ if [ -f "${PARAMETERS_FILE}" ] && [ ! -f "${LOCATION_FILE}" ]; then
     } > "${LOCATION_FILE}"
 fi
 
-# --- 4. Start the application --------------------------------------------------
+# --- 4. PostgreSQL startup data repair -----------------------------------------
+# Workaround for an upstream defect: the V13.0.1 upgrade script uses a MySQL-only
+# multi-table UPDATE that PostgreSQL cannot execute, so the intended backfill of
+# subtask.idProject is silently skipped (docs/known-issues.md, issue P1). The
+# script is idempotent and exits 0 even when it cannot repair anything.
+if [ "${PQ_PG_REPAIR:-true}" = "true" ] && [ -f /usr/local/bin/projeqtor-pg-repair.php ]; then
+    php /usr/local/bin/projeqtor-pg-repair.php || log "WARNING: PostgreSQL data repair failed (non-fatal)"
+fi
+
+# --- 5. Start the application --------------------------------------------------
 exec "$@"

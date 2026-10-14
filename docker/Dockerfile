@@ -145,12 +145,19 @@ RUN set -eux; \
         "${APP_ROOT}/cache"; \
     chown -R www-data:www-data "${APP_ROOT}"
 
-# --- Entrypoint and health check endpoint ------------------------------------
+# --- Entrypoint, health check and startup data repair ------------------------
+# The repair script lives outside the document root on purpose: it must never be
+# reachable over HTTP. See docs/known-issues.md (issue P1).
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY docker/healthz.php "${APP_ROOT}/healthz.php"
+COPY docker/pg-repair-subtask-idproject.php /usr/local/bin/projeqtor-pg-repair.php
 RUN set -eux; \
     chmod 0755 /usr/local/bin/docker-entrypoint.sh; \
-    chown www-data:www-data /usr/local/bin/docker-entrypoint.sh "${APP_ROOT}/healthz.php"
+    chmod 0644 /usr/local/bin/projeqtor-pg-repair.php; \
+    chown www-data:www-data \
+        /usr/local/bin/docker-entrypoint.sh \
+        /usr/local/bin/projeqtor-pg-repair.php \
+        "${APP_ROOT}/healthz.php"
 
 USER www-data
 
