@@ -28,6 +28,7 @@
 │   ├── values.yaml                      # 全量可配置参数
 │   ├── README.md                        # 参数表 + 安装/升级/卸载
 │   └── templates/                       # K8s 资源模板
+├── docs/known-issues.md                 # 已知问题与验证记录（含证据与处置状态）
 └── README.md
 ```
 
@@ -106,6 +107,12 @@ Helm Chart 提供可选的 CronJob（`cronJob.enabled=true`），在 Pod 重启�
 
 `files/`（附件、日志、PHP session）在 Pod 间共享，副本数 > 1 时必须使用
 `ReadWriteMany` 存储（`persistence.accessModes`）。
+
+## 已知问题
+
+真机验证（PostgreSQL 17）中识别出的全部问题、证据与处置状态见
+[docs/known-issues.md](docs/known-issues.md)。当前已记录 2 项上游缺陷
+（PG 升级脚本方言兼容性、缺失 `User-Agent` 时请求中断），均不阻断部署与使用。
 
 ## 开源协议
 
