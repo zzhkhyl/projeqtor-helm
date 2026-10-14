@@ -257,7 +257,7 @@ Pod 重建也不会拉取新镜像 —— 镜像变更静默不生效。
   经 `helm upgrade --atomic` 完成滚动更新。证据：Pod `imageID` 由
   `sha256:176067cb…` 变为 `sha256:4b58f471…`（证明确实拉取了新镜像）；启动日志出现
   4 行 `[projeqtor-pg-repair]` 输出；容器内 `PQ_PG_REPAIR=true`；`healthz=200`、`login.php=200`。
-* 该实例的部署 values 存放在 k3s 主机 `<主机上的部署 values>`（仓库之外，不入库）。
+* 该实例的部署 values 存放在 k3s 主机上（仓库之外，不入库）。
 * **仍未改变的部分**：chart 默认依然是 `pullPolicy: IfNotPresent` + `image.tag` 取
   `appVersion`，CI 也仍会覆盖同名版本 tag。所以「固定 sha tag」目前是本实例的**部署约定**，
   而不是 chart 的默认行为 —— 新部署若沿用例子里带版本号的 tag，仍会踩到本问题。
@@ -453,10 +453,8 @@ RESULT: LOGIN SUCCESS (admin/admin)
 * **Secret 键语义与口令轮换**：见 [N4](#n4--数据库不在-chart-内--自建-secret-的双键语义)
   与 `charts/projeqtor/README.md` 的「数据库与 Secret（重要）」章节；当前实例
   `POSTGRES_PASSWORD` 与 `PQ_DB_PASSWORD` 同值（sha256 已校验）。
-* **k3s 主机上的交付物**（仓库之外）：`<主机上的部署 values>`（部署 values）、
-  `<主机上的 Secret 导出>`（Secret 导出记录）、`<主机上的明文 Secret>`
-  （`stringData` 明文版，可直接编辑 apply）、`<主机上的 chart 副本>`（升级用 chart）、
-  `<主机上的 TLS 证书文件>`（Ingress TLS 证书权威文件）。
+* **k3s 主机上的交付物**（仓库之外，均为本机运维文件，不入库）：部署 values、
+  Secret 导出（含 `stringData` 明文版）、升级用 chart 副本、Ingress TLS 证书文件。
 
 ---
 
