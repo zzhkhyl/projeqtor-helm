@@ -25,6 +25,7 @@
 | [P3](#p3--可变版本-tag--ifnotpresent导致镜像更新不生效) | 可变版本 tag + `IfNotPresent`，导致镜像变更不会落到既有部署 | 交付侧 | 中 | 所有已部署实例在镜像重建后的升级 | 🟢 已缓解（本实例采用方案 1） |
 | [P4](#p4--php-会话不在-pvc-上多副本不共享pod-重建掉登录) | `session.save_path` 未设置，PHP 会话落在容器 `/tmp`：Pod 重建即掉登录、多副本不共享 | 交付侧 | 中 | 所有实例（单副本升级掉登录；多副本共享失效） | 🟢 已修复（代码侧，待镜像重建生效） |
 | [P5](#p5--files-目录可被-http-直读日志未认证可读附件绕过下载令牌) | `files/` 位于文档根内且未限制访问：日志未认证可读、附件绕过下载令牌 | 交付侧 | 中高 | 所有实例 | 🟢 已修复（代码侧，待镜像重建生效） |
+| [P6](#p6--数据库未初始化时入口脚本生成的-parametersphp-不完整全站-0-字节白屏) | 数据库未初始化时生成残缺的 `parameters.php`（缺 `logFile`），`logTracing()` 直接 `exit()` → 全站 200 + 0 字节，且永远到不了登录页因而无法自愈 | 交付侧 | 高 | 所有数据库尚未初始化的实例（全新部署首次启动） | 🟢 已修复（代码侧，待镜像重建生效；本实例已实测恢复） |
 | [N1](#n1--aes-加密类脱离框架不可用) | AES 加密类依赖 `pq_ord()` / `pq_substr()`，脱离框架无法直接调用 | 排查注意 | — | 仅影响外部调试脚本 | ⚪ |
 | [N2](#n2--session-激活后无法再改-session-id) | `session_start()` 之后再调 `session_id()` 会报错 | 排查注意 | — | 仅影响外部调试脚本 | ⚪ |
 | [N3](#n3--用户表名为-resource-而非-user) | 用户数据存于 `resource` 表，不存在 `user` 表 | 排查注意 | — | 仅影响 SQL 排查 | ⚪ |
@@ -35,7 +36,9 @@ P1、P2 来自上游 ProjeQtOr 自身且都不阻断部署与使用；P1 已在�
 （见 P1「处置记录」）。P3、P4、P5 属于本仓库交付侧：P3 是升级生效性问题，本实例已按方案 1
 （固定不可变 tag）部署并验证生效，而 chart 与 CI 的默认行为未变 —— 新部署仍可能踩到；
 P4 是「PHP 会话不在 PVC 上」、P5 是「`files/` 目录可被 HTTP 直读」，两者均已在镜像 /
-模板 / 入口脚本侧修复，待重建镜像后生效与验证。
+模板 / 入口脚本侧修复，待重建镜像后生效与验证。P6 属本仓库交付侧且**严重度为高**：
+它是「数据库尚未初始化」这一全新部署首次启动的必经状态下的致命缺陷（`smrd` 实例即因此白屏），
+已在入口脚本侧修复，并在该实例上实测恢复（建库 357 张表 + `admin/admin` 真实登录通过）。
 
 ---
 
@@ -387,6 +390,104 @@ Loaded Configuration File: (none)          # 官方 php 镜像不加载任何 ph
 
 ---
 
+### P6 · 数据库未初始化时入口脚本生成的 `parameters.php` 不完整，全站 0 字节白屏
+
+**严重度**：高（应用完全不可用，且无法自愈）
+**归属**：本仓库交付侧（`docker/docker-entrypoint.sh` 生成的参数文件缺少框架启动必需项）
+**状态**：🟢 已修复（入口脚本补全 + 可原地修复既有部署；本实例已实测恢复）
+
+#### 现象
+
+数据库尚未初始化的部署，访问**任何**加载框架的入口都返回 `HTTP 200` + `Content-Length: 0`：
+无 HTML、无 PHP 报错、`files/logs/` 也始终为空。很容易被误判为镜像 / Ingress / 探针问题。
+
+| 请求 | 结果 |
+|---|---|
+| `GET /`、`GET /index.php` | 200，**0 字节** |
+| `GET /view/index.php`、`GET /view/login.php`、`GET /tool/*.php` | 200，**0 字节** |
+| `GET /healthz.php`（不加载框架） | 200，正常 |
+
+响应头里带 `Set-Cookie: PHPSESSID`，说明 `session_start()` 已经执行过。
+
+#### 根因
+
+`tool/projeqtor.php` 每次请求都会调用 `scriptLog()`，它进入 `logTracing()`：
+
+```php
+$logFile=Parameter::getGlobalParameter('logFile');
+if (!$logFile or $logFile=='' or $level==9) {
+    exit();                 // tool/projeqtor.php:3248-3251
+}
+```
+
+`Parameter::getGlobalParameter('logFile')` 的取值顺序是"先看参数文件定义的全局变量，再查数据库"
+（`model/Parameter.php:1631-1675`）。而：
+
+* 入口脚本生成的 `parameters.php` 只写了 7 个 `$paramDb*`（`docker/docker-entrypoint.sh`）；
+* 数据库尚未初始化，没有 `parameter` 表可查 —— 且该查询被 `enableCatchErrors()` /
+  `enableSilentErrors()` **静默吞掉**。
+
+于是 `logFile` 恒为空 → `logTracing()` 直接 `exit()`：**输出为空、无 PHP 错误、不写日志**，
+与观测到的现象完全吻合。
+
+**为什么空库会走到这一步**：入口脚本会预先生成 `tool/parametersLocation.php`，
+使 `tool/projeqtor.php:94` 走「已安装」分支，从而**跳过** `tool/projeqtor.php:110-115`
+的配置向导分支（向导在 `scriptLog()` 之前，所以向导路径不受影响），直达 `scriptLog()`。
+
+**这构成死锁**：应用永远无法启动 → 永远到不了登录页 → 也就永远无法通过
+「首次以 `admin`/`admin` 登录触发 `db/maintenance.php`」完成建库。
+
+> 对照：ProjeQtOr 自带的 web 向导会把**全部**参数写入 `parameters.php`
+> （`tool/configCheck.php:213-217`），其中 `logFile`、`logLevel` 都是必填项
+> （`tool/config.php:331,338`）。入口脚本手写的参数文件漏掉了它们 —— 这是与上游契约的偏差。
+
+#### 证据（实测 2026-10-14，实例 `smrd/projeqtor-*`）
+
+同一引导链的四组对照实验：
+
+| 变体 | 条件 | 结果 |
+|---|---|---|
+| A | 置 `$noScriptLog=true`（跳过 `scriptLog`） | **存活**，并打印 `logFile='' logLevel=''` |
+| B | 预置 `$logFile` | **存活** |
+| C | 原样 | 在 `projeqtor.php` 内 `exit()`，`[SHUTDOWN] clean`（无任何 PHP 错误） |
+| D | 预置 `$logFile`+`$logLevel` 后跑完整 `index.php` | 200 / 3810 字节，输出正常启动页 |
+
+#### 修复
+
+* `docker/docker-entrypoint.sh` 生成的 `parameters.php` 补齐两个框架启动必需项
+  （取值与上游向导默认值一致），并支持 `PQ_LOG_FILE` / `PQ_LOG_LEVEL` 覆盖：
+  ```php
+  $logFile = '../files/logs/projeqtor_${date}.log';
+  $logLevel = '2';
+  ```
+* **附带对既有部署的原地修复**：参数文件从不被覆盖，因此老部署升级后仍是残缺文件。
+  入口脚本现在会检查这两个键，缺失则**追加**（幂等；文件含 `?>` 时只告警不改，
+  避免把代码追加到 PHP 块之外）。
+
+#### 验证
+
+| 验证项 | 方法 | 结果 |
+|---|---|---|
+| 入口脚本语法 | `bash -n` | 通过 |
+| 新生成 / 修复既有文件 / 幂等 / 保留自定义值 / `?>` 保护 / 环境变量覆盖 / 未设 `PQ_DB_HOST` 不生成 | 本地 7 场景 19 条断言 | **19/19 通过** |
+| 真实镜像行为 | 用交付镜像起一次性 Pod（不挂 PVC、不碰生产对象）跑同一脚本 | **14/14 通过**，含反向对照（抽掉 `logFile` 立即复现静默退出，修复脚本再加回即恢复） |
+| 生产端到端 | 在本实例 Pod 内执行新的入口脚本逻辑 | `/` 由 0 字节 → 3812 字节；`files/logs/projeqtor_20261014.log` 开始写入（此前恒为空） |
+| 建库 | 触发 `db/maintenance.php` | `parameter` 表建立，**`tables=357`**，**`dbVersion=V13.1.1`**，`files/cron/MIGRATION` 已自动清理 |
+| 真实登录 | AES 全链路 `admin`/`admin` | `Login accepted` / `validated=OK`；`/view/main.php` 返回 741 304 字节完整界面（`menuBar` 存在） |
+
+> 注意事项：热修参数文件后，受 opcache `revalidate_freq` 窗口影响，页面可能仍为 0 字节约数秒。
+> 镜像重建后由入口脚本在 Apache 启动**之前**写文件，不存在该窗口。
+
+#### 影响与操作
+
+* 受影响：**所有数据库尚未初始化的实例**（即全新部署最常见的首次启动）。
+* 首次启动后仍需一次人工步骤：登录 `admin`/`admin` 即会自动建库（上游既有设计，
+  `tool/loginCheck.php:56-62`），耗时较长属正常现象。
+* 该修复位于镜像内的入口脚本，需要**重建镜像**才能交付，见
+  [P3](#p3--可变版本-tag--ifnotpresent导致镜像更新不生效)。
+
+---
+
 ### N1 · AES 加密类脱离框架不可用
 
 在容器内编写独立脚本复现登录流程时，`AesCtr::encrypt()` 报
@@ -487,9 +588,17 @@ RESULT: LOGIN SUCCESS (admin/admin)
   并设置 `export KUBECONFIG=/etc/rancher/k3s/k3s.yaml`。
 * **关键标签**：应用 Pod 用 `app.kubernetes.io/name=projeqtor`（容器名 `projeqtor`，监听 `127.0.0.1:8080`）；
   数据库 Pod 用 `app=projeqtor-postgres`。
-* **首次安装触发方式**：entrypoint 仅生成 `files/config/parameters.php` 与
-  `tool/parametersLocation.php`（`docker/docker-entrypoint.sh:39-68`），**不**主动触发安装；
-  安装 / 升级由首次 HTTP 请求（`index.php`）触发，耗时较长，属正常现象。
+* **首次安装触发方式**（本行曾描述有误，已更正）：entrypoint 生成
+  `files/config/parameters.php` 与 `tool/parametersLocation.php`
+  （`docker/docker-entrypoint.sh`），**不**主动触发安装。安装由**首次以 `admin`/`admin`
+  登录**触发（`tool/loginCheck.php:56-62` → `include "../db/maintenance.php"`），
+  遍历 182 个 `db/projeqtor_V*.sql`、建成 357 张表，耗时较长属正常现象。
+  ⚠️ 注意：登录**之前**必须先能打开登录页；数据库未初始化时若参数文件残缺会直接白屏，
+  见 [P6](#p6--数据库未初始化时入口脚本生成的-parametersphp-不完整全站-0-字节白屏)。
+* **白屏排查（200 + 0 字节）**：先看是否 [P6](#p6--数据库未初始化时入口脚本生成的-parametersphp-不完整全站-0-字节白屏)；
+  判据是响应头有 `Set-Cookie: PHPSESSID`（说明已过 `session_start()`）且 `files/logs/` 为空。
+  `Parameter::getGlobalParameter('logFile')` 为空时 `logTracing()` 会静默 `exit()`，
+  此时 `display_errors` 不会产出任何信息，**不要**据此判断为镜像或 Ingress 故障。
 * **查询数据库版本**：`select parametercode, parametervalue from parameter where parametercode='dbVersion'` → `V13.1.1`。
 * **日志位置**：容器内 `/var/www/html/files/logs/projeqtor_<YYYYMMDD>.log`；
   升级错误用 `grep -E "WITH [0-9]+ ERROR|ERROR \*+"` 定位。
@@ -522,6 +631,7 @@ RESULT: LOGIN SUCCESS (admin/admin)
 | 8 | 重建镜像并在 k3s 上验证 P4 修复（Pod 重建后登录态保留；多副本下会话跨 Pod 共享） | P4 | 待执行（代码与文档已改、本地基镜像实测通过；需 CI 构建新镜像并更新部署 tag） |
 | 9 | 重建镜像并验证 P5 加固（附件下载、头像/缩略图、日志查看页仍正常；`files/logs` 等目录返回 403） | P5 | 待执行（同上，可与 P4 同一次镜像重建与升级一并验证） |
 | 10 | 在非生产环境验证 `seccompProfile: RuntimeDefault` 下 Apache/PHP 正常（chart 默认已启用） | 安全加固 | 待执行（仅有本地旁证：Docker 默认 seccomp 下一切正常） |
+| 11 | 重建镜像并验证 P6：全新空库部署首次启动不再白屏；既有部署升级后参数文件被原地修复 | P6 | 待执行（代码与文档已改；本地 19/19、真实镜像一次性 Pod 14/14、生产实例端到端手工验证均已通过） |
 
 ---
 
@@ -535,3 +645,4 @@ RESULT: LOGIN SUCCESS (admin/admin)
 | 2026-10-14 | CI 增加 `paths` 过滤（仅 `docker/**`、`.dockerignore`、工作流自身触发），并以纯文档提交实测确认不再触发构建（该提交无 Actions 运行，对照的工作流变更提交触发 run #5 构建成功）；P3 处置：本实例改用固定不可变 tag `sha-8a050b3` 滚动更新并验证生效，状态 🟡 → 🟢，摘要表 / 总体结论 / 待决事项 / 验证基线同步更新 |
 | 2026-10-14 | 新增 [P4](#p4--php-会话不在-pvc-上多副本不共享pod-重建掉登录)：实测基镜像确认 `session.save_path` 为空、会话落在容器 `/tmp`（不在 PVC）；修复为镜像 ini 指向 `files/session` + 入口脚本创建该目录并写入 `.htaccess`；修正 `values.yaml` / chart README / 根 README 共 4 处错误的「会话在 Pod 间共享」说法；摘要表、总体结论、待决事项新增相应条目 |
 | 2026-10-14 | 安全加固：新增 [P5](#p5--files-目录可被-http-直读日志未认证可读附件绕过下载令牌) 并修复（镜像内 Apache 对 `attach/config/cron/logs/report/import/session` 设 `Require all denied`，保留 `images`、`thumbs`）；工作流补顶层最小权限（`contents: read` + detect job 的 `packages: read`）；关闭应用 Pod 与 CronJob 的 `automountServiceAccountToken`；`podSecurityContext` 增加 `seccompProfile: RuntimeDefault`；chart README 增加「口令会落到哪些地方（安全提示）」；`.gitignore` 增加根目录 `/*values*.yaml`、`/*secret*.yaml` 防误提交；Chart 版本 `0.1.0` → `0.2.0` |
+| 2026-10-14 | 新增 [P6](#p6--数据库未初始化时入口脚本生成的-parametersphp-不完整全站-0-字节白屏)（`smrd` 实例白屏根因）并修复：`docker/docker-entrypoint.sh` 生成的 `parameters.php` 补齐上游向导必填的 `$logFile` / `$logLevel`（支持 `PQ_LOG_FILE` / `PQ_LOG_LEVEL` 覆盖），并新增对既有残缺参数文件的幂等原地修复；更正第 5 节「首次安装触发方式」的错误描述（实为 `admin`/`admin` 登录触发 `db/maintenance.php`）并补充「200 + 0 字节」白屏判据；chart README / NOTES 补充首次启动步骤与日志参数；Chart 版本 `0.2.0` → `0.2.1` |

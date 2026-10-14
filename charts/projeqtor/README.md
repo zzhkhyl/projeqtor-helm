@@ -33,6 +33,15 @@ kubectl -n projeqtor port-forward svc/projeqtor 8080:8080
 # 浏览器打开 http://localhost:8080，首次登录 admin / admin（请立即修改）
 ```
 
+> **首次启动 = 建库（重要）**：Chart 不创建数据库结构。入口脚本只写入连接参数，
+> **数据库的建表与初始化由首次以 `admin` / `admin` 登录触发**
+> （`tool/loginCheck.php` → `db/maintenance.php`，遍历 182 个版本脚本、建成 357 张表），
+> 整个过程耗时较长属正常现象。因此首次部署后请务必完成一次登录，否则库一直是空的。
+>
+> 相关背景（含「访问任何页面都是 200 + 0 字节白屏」这一历史缺陷）见
+> [docs/known-issues.md](../../docs/known-issues.md) 的
+> [P6](../../docs/known-issues.md#p6--数据库未初始化时入口脚本生成的-parametersphp-不完整全站-0-字节白屏)。
+
 > **注意**：后台任务（cron）需要在管理界面手动启动一次
 > （Administration → cron）。设置 `cronJob.enabled=true` 后，Pod 重启时
 > CronJob 会自动将其重新拉起。
@@ -77,6 +86,8 @@ kubectl -n projeqtor delete pvc projeqtor-files
 | `env.PQ_DB_USER` | 数据库用户 | `projeqtor` |
 | `env.TZ` | 容器时区 | `UTC` |
 | `env.PQ_PG_REPAIR` | PostgreSQL 启动数据自愈（幂等、非致命，见 [docs/known-issues.md](../../docs/known-issues.md) P1） | `"true"` |
+| `env.PQ_LOG_FILE` | 覆盖写入 `parameters.php` 的 `$logFile`（ProjeQtOr 启动必需项，见 P6） | `../files/logs/projeqtor_${date}.log` |
+| `env.PQ_LOG_LEVEL` | 覆盖写入 `parameters.php` 的 `$logLevel`（同上） | `"2"` |
 | `database.password` | 数据库密码（chart 托管 Secret） | `""` |
 | `database.existingSecret` | 使用已有 Secret 名 | `""` |
 | `database.existingSecretKey` | 已有 Secret 中的 key | `PQ_DB_PASSWORD` |

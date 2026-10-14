@@ -9,7 +9,10 @@
 #      volume on purpose: see docs/known-issues.md (issue P4).
 #   2. Generate files/config/parameters.php from the PQ_DB_* environment
 #      variables when no configuration exists yet. An existing file is never
-#      overwritten, so `helm upgrade` keeps a working configuration.
+#      overwritten, so `helm upgrade` keeps a working configuration. The file
+#      also carries the global parameters ProjeQtOr requires to boot at all
+#      (logFile, logLevel - see step 2), and a file written by an older release
+#      of this image is repaired in place instead of being ignored.
 #   3. Create tool/parametersLocation.php pointing to the parameters file
 #      (same file the web installer would create).
 #   4. Run the PostgreSQL startup data repair, a workaround for an upstream
@@ -51,10 +54,36 @@ if [ -d "${APP_ROOT}/files/session" ] && [ ! -f "${APP_ROOT}/files/session/.htac
 fi
 
 # --- 2. Database configuration from environment ------------------------------
-if [ -f "${PARAMETERS_FILE}" ]; then
-    log "Using existing ${PARAMETERS_FILE}"
-elif [ -n "${PQ_DB_HOST:-}" ]; then
-    log "Generating ${PARAMETERS_FILE} from PQ_DB_* environment variables"
+#
+# Two of the parameters written below are not about the database at all, but
+# ProjeQtOr cannot start without them.
+#
+# tool/projeqtor.php runs scriptLog() on every request, which reaches
+# logTracing() (tool/projeqtor.php:3248-3251):
+#
+#     $logFile=Parameter::getGlobalParameter('logFile');
+#     if (!$logFile or $logFile=='' or $level==9) {
+#       exit();
+#     }
+#
+# On a database that has never been initialised there is no 'parameter' table
+# to read 'logFile' from, so the value has to come from this file. If it does
+# not, every request aborts with HTTP 200 and a 0-byte body - before the login
+# page, and therefore before the database installation that login triggers, can
+# ever be reached. The web installer writes both entries
+# (tool/config.php:331,338 - both are mandatory there); this script must emit
+# exactly the same contract.
+PARAM_LOG_FILE="${PQ_LOG_FILE:-}"
+if [ -z "${PARAM_LOG_FILE}" ]; then
+    # Single-quoted on purpose. The literal '${date}' placeholder must reach
+    # ProjeQtOr untouched (logTracing replaces it with the current date), and
+    # nesting it inside a ${VAR:-...} default makes bash close the braces at the
+    # wrong place ('projeqtor_${date.log}').
+    PARAM_LOG_FILE='../files/logs/projeqtor_${date}.log'
+fi
+PARAM_LOG_LEVEL="${PQ_LOG_LEVEL:-2}"
+
+write_parameters_file() {
     mkdir -p "$(dirname "${PARAMETERS_FILE}")"
     {
         printf '<?php\n'
@@ -68,7 +97,37 @@ elif [ -n "${PQ_DB_HOST:-}" ]; then
         printf "\$paramDbUser = '%s';\n"     "$(php_escape "${PQ_DB_USER:-projeqtor}")"
         printf "\$paramDbPassword = '%s';\n" "$(php_escape "${PQ_DB_PASSWORD:-}")"
         printf "\$paramDbPrefix = '%s';\n"   "$(php_escape "${PQ_DB_PREFIX:-}")"
+        printf "\$logFile = '%s';\n"         "$(php_escape "${PARAM_LOG_FILE}")"
+        printf "\$logLevel = '%s';\n"        "$(php_escape "${PARAM_LOG_LEVEL}")"
     } > "${PARAMETERS_FILE}"
+}
+
+# Add one global parameter when the file does not define it yet. Older releases
+# of this image wrote only the $paramDb* entries, and the file is
+# never overwritten, so an upgraded deployment keeps the incomplete version and
+# would still show the 0-byte symptom. Never touch a file that closes its PHP
+# block - appending there would silently produce dead code.
+ensure_parameters_key() {
+    _key="$1"
+    _line="$2"
+    if grep -qE '^[[:space:]]*\$'"${_key}"'[[:space:]]*=' "${PARAMETERS_FILE}"; then
+        return 0
+    fi
+    if grep -q '[?]>' "${PARAMETERS_FILE}"; then
+        log "WARNING: ${PARAMETERS_FILE} closes its PHP block - cannot add \$${_key} automatically"
+        return 0
+    fi
+    printf '%s\n' "${_line}" >> "${PARAMETERS_FILE}"
+    log "Repaired ${PARAMETERS_FILE}: added missing \$${_key}"
+}
+
+if [ -f "${PARAMETERS_FILE}" ]; then
+    log "Using existing ${PARAMETERS_FILE}"
+    ensure_parameters_key logFile  "\$logFile = '$(php_escape "${PARAM_LOG_FILE}")';"
+    ensure_parameters_key logLevel "\$logLevel = '$(php_escape "${PARAM_LOG_LEVEL}")';"
+elif [ -n "${PQ_DB_HOST:-}" ]; then
+    log "Generating ${PARAMETERS_FILE} from PQ_DB_* environment variables"
+    write_parameters_file
 else
     log "PQ_DB_HOST is not set - the web installation wizard will be used on first access"
 fi

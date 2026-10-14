@@ -90,6 +90,7 @@ docker run -d -p 8080:8080 \
   -v projeqtor_files:/var/www/html/files \
   projeqtor:13.1.1
 # 打开 http://localhost:8080，首次登录 admin / admin（请立即修改）
+# 注意：数据库的建表与初始化正是由这次登录触发（见「环境变量」一节）
 ```
 
 ## 环境变量（镜像契约）
@@ -105,8 +106,18 @@ docker run -d -p 8080:8080 \
 | `PQ_DB_PREFIX` | 表前缀 | 空 |
 | `TZ` | 容器时区 | `UTC` |
 | `PQ_PG_REPAIR` | PostgreSQL 启动数据自愈开关（幂等、非致命，见 [docs/known-issues.md](docs/known-issues.md) P1） | `true` |
+| `PQ_LOG_FILE` | 写入 `parameters.php` 的 `$logFile`（ProjeQtOr 启动必需，见 [P6](docs/known-issues.md)） | `../files/logs/projeqtor_${date}.log` |
+| `PQ_LOG_LEVEL` | 写入 `parameters.php` 的 `$logLevel`（同上） | `2` |
 
 未设置 `PQ_DB_HOST` 时，首次访问会进入 ProjeQtOr 自带的 Web 安装向导。
+
+设置 `PQ_DB_HOST` 时，入口脚本只写**连接参数**，**不会**创建数据库结构；建表由
+**首次以 `admin` / `admin` 登录**触发（`tool/loginCheck.php` → `db/maintenance.php`，
+遍历 182 个版本脚本、建成 357 张表）。完成这次登录前数据库一直是空的。
+
+> `parameters.php` 已存在时不会被覆盖；但若它缺少 `$logFile`（旧版镜像生成的残缺文件），
+> 入口脚本会在每次启动时**幂等追加**补齐，避免出现"访问任何页面都是 200 + 0 字节"
+> 的白屏（详见 [docs/known-issues.md](docs/known-issues.md) 的 P6）。
 
 ## 后台任务（cron）
 
