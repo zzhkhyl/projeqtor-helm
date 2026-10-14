@@ -4,7 +4,7 @@ description: A Helm chart to deploy ProjeQtOr collaborative project management s
 type: application
 
 # Chart version - bump on every change to this chart
-version: 0.1.0
+version: 0.2.0
 
 # ProjeQtOr application version (default image tag).
 # Keep in sync with the latest upstream release, or set image.tag explicitly.

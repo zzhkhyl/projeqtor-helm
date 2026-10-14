@@ -129,6 +129,11 @@ podSecurityContext:
   runAsUser: 33      # www-data
   runAsGroup: 33
   fsGroup: 33
+  # -- Restrict the syscall surface to the container runtime's default profile.
+  # PHP + Apache run fine under it (all local verification was done with the
+  # runtime's default seccomp profile active).
+  seccompProfile:
+    type: RuntimeDefault
 
 # -- Container-level security context.
 securityContext:

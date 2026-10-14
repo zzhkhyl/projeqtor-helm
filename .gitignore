@@ -3,3 +3,11 @@
 # time, so this directory must never be committed).
 /projeqtor/
 .codebuddy/
+
+# Local deployment values and secret manifests (they contain real hostnames,
+# credentials and TLS material) belong on the deployment host, never here.
+# Anchored at the repository root on purpose, so the chart's own files
+# (charts/projeqtor/values.yaml, charts/projeqtor/templates/secret.yaml)
+# are never affected.
+/*values*.yaml
+/*secret*.yaml

@@ -114,6 +114,27 @@ RUN set -eux; \
     printf 'ServerName localhost\n' > /etc/apache2/conf-available/servername.conf; \
     a2enconf servername
 
+# --- Deny HTTP access to the files/ directories that never need it -----------
+# ProjeQtOr reaches these directories through the filesystem only: downloads and
+# previews go through tool/download.php (token protected), the logs and the
+# generated parameters.php are read server-side. Serving them over HTTP would
+#   - expose the application log under a predictable name (projeqtor_<date>.log),
+#   - let an attachment bypass the download token check,
+#   - hand out editor/backup leftovers verbatim (e.g. parameters.php.bak), since
+#     only files ending in .php are passed to the PHP handler.
+# files/images and files/thumbs must stay reachable: the UI links to them
+# directly (model/Affectable.php:getThumbUrl(), model/InputMailboxTicket.php).
+# See docs/known-issues.md (issue P5).
+RUN set -eux; \
+    { \
+        for d in attach config cron logs report import session; do \
+            echo "<Directory ${APP_ROOT}/files/${d}>"; \
+            echo '    Require all denied'; \
+            echo '</Directory>'; \
+        done; \
+    } > /etc/apache2/conf-available/zz-projeqtor-files.conf; \
+    a2enconf zz-projeqtor-files
+
 # --- Download the ProjeQtOr release from SourceForge ------------------------
 RUN set -eux; \
     mkdir -p /tmp/src; \

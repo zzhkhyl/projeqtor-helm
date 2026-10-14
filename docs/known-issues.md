@@ -24,6 +24,7 @@
 | [P2](#p2--缺少-user-agent-时请求被中断) | 缺失 `User-Agent` 的请求被应用错误处理器中断 | 上游缺陷 | 低 | 无头 HTTP 客户端（不含浏览器、不含本 Chart 探针） | 🟡 |
 | [P3](#p3--可变版本-tag--ifnotpresent导致镜像更新不生效) | 可变版本 tag + `IfNotPresent`，导致镜像变更不会落到既有部署 | 交付侧 | 中 | 所有已部署实例在镜像重建后的升级 | 🟢 已缓解（本实例采用方案 1） |
 | [P4](#p4--php-会话不在-pvc-上多副本不共享pod-重建掉登录) | `session.save_path` 未设置，PHP 会话落在容器 `/tmp`：Pod 重建即掉登录、多副本不共享 | 交付侧 | 中 | 所有实例（单副本升级掉登录；多副本共享失效） | 🟢 已修复（代码侧，待镜像重建生效） |
+| [P5](#p5--files-目录可被-http-直读日志未认证可读附件绕过下载令牌) | `files/` 位于文档根内且未限制访问：日志未认证可读、附件绕过下载令牌 | 交付侧 | 中高 | 所有实例 | 🟢 已修复（代码侧，待镜像重建生效） |
 | [N1](#n1--aes-加密类脱离框架不可用) | AES 加密类依赖 `pq_ord()` / `pq_substr()`，脱离框架无法直接调用 | 排查注意 | — | 仅影响外部调试脚本 | ⚪ |
 | [N2](#n2--session-激活后无法再改-session-id) | `session_start()` 之后再调 `session_id()` 会报错 | 排查注意 | — | 仅影响外部调试脚本 | ⚪ |
 | [N3](#n3--用户表名为-resource-而非-user) | 用户数据存于 `resource` 表，不存在 `user` 表 | 排查注意 | — | 仅影响 SQL 排查 | ⚪ |
@@ -31,9 +32,10 @@
 
 **总体结论**：本次部署**功能正常**（全新安装、数据库升级、`admin/admin` 真实 HTTP 登录均验证通过）。
 P1、P2 来自上游 ProjeQtOr 自身且都不阻断部署与使用；P1 已在本仓库侧提供幂等自愈缓解
-（见 P1「处置记录」）。P3 与 P4 属于本仓库交付侧：P3 是升级生效性问题，本实例已按方案 1
+（见 P1「处置记录」）。P3、P4、P5 属于本仓库交付侧：P3 是升级生效性问题，本实例已按方案 1
 （固定不可变 tag）部署并验证生效，而 chart 与 CI 的默认行为未变 —— 新部署仍可能踩到；
-P4 是「PHP 会话不在 PVC 上」，已在镜像与入口脚本侧修复，待重建镜像后生效与验证。
+P4 是「PHP 会话不在 PVC 上」、P5 是「`files/` 目录可被 HTTP 直读」，两者均已在镜像 /
+模板 / 入口脚本侧修复，待重建镜像后生效与验证。
 
 ---
 
@@ -337,6 +339,54 @@ Loaded Configuration File: (none)          # 官方 php 镜像不加载任何 ph
 
 ---
 
+### P5 · files 目录可被 HTTP 直读（日志未认证可读、附件绕过下载令牌）
+
+**严重度**：中高（日志文件名可预测 → 未认证即可读取；附件被绕过授权模型）
+**归属**：本仓库交付侧（镜像内缺少 Apache 访问限制）
+**状态**：🟢 已修复（镜像层 Apache 配置；**待重建镜像生效**）
+
+#### 现象
+
+`files/` 位于文档根内（`/var/www/html/files`），镜像未对它做任何访问限制，只有基镜像
+自带的 `Options -Indexes`（挡住目录列举）。基镜像实测：
+
+| 请求 | 结果 |
+|---|---|
+| `GET /files/logs/projeqtor_<date>.log` | **200 + 日志全文**（文件名可预测 → 未认证可读） |
+| `GET /files/attach/<哈希名>` | 200，直取附件 |
+| `GET /files/config/parameters.php` | 200 但 0 字节（交给 PHP 执行，不泄露） |
+| `GET /files/config/parameters.php~`（或 `.bak`） | **200 + 明文数据库口令**（非 `.php` 后缀按静态文件下发） |
+| `GET /files/logs/` | 403（`Options -Indexes`） |
+
+#### 根因
+
+* 附件在 UI 中一律经 `../tool/download.php?class=Attachment&id=...&token=...` 提供
+  （`view/objectDetail.php:5398`、`view/galleryShow.php:126`），即**本应有鉴权与令牌校验**；
+  同一份文件又以静态路径暴露，等于绕过该模型（利用门槛是先知道哈希文件名，目录无法枚举）。
+* 日志文件名是 `projeqtor_<YYYYMMDD>.log`（`tool/config.php:331`），**可预测**，
+  因此未认证即可读取。
+* 上游 ProjeQtOr 的 `files/config/` 只带一个 `index.php`，没有 `.htaccess` 防护。
+
+#### 修复
+
+镜像内新增 `/etc/apache2/conf-available/zz-projeqtor-files.conf`（并 `a2enconf`），
+对 `attach`、`config`、`cron`、`logs`、`report`、`import`、`session` 设 `Require all denied`；
+`images` 与 `thumbs` 保持可达。
+
+保留这两个目录是**源码核实**的结果：`files/images/` 被 HTML 直链引用
+（`model/InputMailboxTicket.php:786` → `src="../files/images/<id>"`），`files/thumbs/`
+由 `model/Affectable.php:225` 的 `getThumbUrl()` 拼成 URL 返回；其余目录只以文件系统
+路径出现（`tool/config.php:291`、`model/persistence/SqlElement.php:2845` 等），无 URL 引用。
+
+#### 残留注意
+
+* 需重建镜像才能生效；生效后应实测「附件下载、头像/缩略图显示、日志查看页」三项仍正常。
+* `files/session/` 同时受入口脚本写入的 `.htaccess`（见 P4）与本次 conf 覆盖，属有意冗余。
+* 该 conf 依赖 `Require all denied` 的**更具体路径优先**规则生效；与之对照的
+  `/var/www/` 段（`apache2.conf`、`docker-php.conf`）授予访问，该行为已实测确认。
+
+---
+
 ### N1 · AES 加密类脱离框架不可用
 
 在容器内编写独立脚本复现登录流程时，`AesCtr::encrypt()` 报
@@ -470,6 +520,8 @@ RESULT: LOGIN SUCCESS (admin/admin)
 | 6 | 让自愈逻辑真正生效：等 CI 用新代码重建镜像并完成滚动更新（受 P3 影响） | P1 / P3 | ✅ 已完成（2026-10-14；以 `sha-8a050b3` 滚动更新，启动日志出现 4 行 `[projeqtor-pg-repair]`、`PQ_PG_REPAIR=true`） |
 | 7 | 选择 P3 的处置方式（不可变 tag / `Always` / CI 不覆盖版本 tag） | P3 | ✅ 已完成（2026-10-14；采用方案 1 固定不可变 tag，见 P3「处置记录」） |
 | 8 | 重建镜像并在 k3s 上验证 P4 修复（Pod 重建后登录态保留；多副本下会话跨 Pod 共享） | P4 | 待执行（代码与文档已改、本地基镜像实测通过；需 CI 构建新镜像并更新部署 tag） |
+| 9 | 重建镜像并验证 P5 加固（附件下载、头像/缩略图、日志查看页仍正常；`files/logs` 等目录返回 403） | P5 | 待执行（同上，可与 P4 同一次镜像重建与升级一并验证） |
+| 10 | 在非生产环境验证 `seccompProfile: RuntimeDefault` 下 Apache/PHP 正常（chart 默认已启用） | 安全加固 | 待执行（仅有本地旁证：Docker 默认 seccomp 下一切正常） |
 
 ---
 
@@ -482,3 +534,4 @@ RESULT: LOGIN SUCCESS (admin/admin)
 | 2026-10-14 | 新增 [N4](#n4--数据库不在-chart-内--自建-secret-的双键语义)：Chart 不含数据库部署与镜像（附渲染证据）、自建 Secret 的双键语义与轮换约束；chart README 增加「数据库与 Secret（重要）」章节；根 README 增加数据库归属提示；环境事实补充 k3s 主机交付物清单 |
 | 2026-10-14 | CI 增加 `paths` 过滤（仅 `docker/**`、`.dockerignore`、工作流自身触发），并以纯文档提交实测确认不再触发构建（该提交无 Actions 运行，对照的工作流变更提交触发 run #5 构建成功）；P3 处置：本实例改用固定不可变 tag `sha-8a050b3` 滚动更新并验证生效，状态 🟡 → 🟢，摘要表 / 总体结论 / 待决事项 / 验证基线同步更新 |
 | 2026-10-14 | 新增 [P4](#p4--php-会话不在-pvc-上多副本不共享pod-重建掉登录)：实测基镜像确认 `session.save_path` 为空、会话落在容器 `/tmp`（不在 PVC）；修复为镜像 ini 指向 `files/session` + 入口脚本创建该目录并写入 `.htaccess`；修正 `values.yaml` / chart README / 根 README 共 4 处错误的「会话在 Pod 间共享」说法；摘要表、总体结论、待决事项新增相应条目 |
+| 2026-10-14 | 安全加固：新增 [P5](#p5--files-目录可被-http-直读日志未认证可读附件绕过下载令牌) 并修复（镜像内 Apache 对 `attach/config/cron/logs/report/import/session` 设 `Require all denied`，保留 `images`、`thumbs`）；工作流补顶层最小权限（`contents: read` + detect job 的 `packages: read`）；关闭应用 Pod 与 CronJob 的 `automountServiceAccountToken`；`podSecurityContext` 增加 `seccompProfile: RuntimeDefault`；chart README 增加「口令会落到哪些地方（安全提示）」；`.gitignore` 增加根目录 `/*values*.yaml`、`/*secret*.yaml` 防误提交；Chart 版本 `0.1.0` → `0.2.0` |

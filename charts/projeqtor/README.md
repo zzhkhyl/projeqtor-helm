@@ -196,3 +196,17 @@ kubectl -n <ns> rollout restart deploy/<release>
 > 进 `data`，不会删除 `data` 中的旧键。实测：先 apply `{A,B}`，再 apply 只含 `{A}`
 > 的版本，`data` 中的 `B` 依然存在。需要删键时必须显式执行
 > `kubectl patch secret <name> --type=json -p='[{"op":"remove","path":"/data/<KEY>"}]'`。
+
+### 口令会落到哪些地方（安全提示）
+
+Chart 不会主动泄露口令，但下面几种用法会让口令出现在本意之外的位置：
+
+| 用法 | 口令落到哪里 | 建议 |
+|---|---|---|
+| `--set database.password=<口令>` | 集群内的 Helm release Secret（`sh.helm.release.v1.*`，base64 存放、**非加密**），以及你的 shell 历史 | 改用 `database.existingSecret`，或用权限受限的 values 文件 |
+| `parameters.mount=true` + `parameters.content` | `parameters.php` 来自 **ConfigMap**（与 `env` 同一个 ConfigMap 的 `data.parameters.php`），而它必须含 `$paramDbPassword`；ConfigMap 以明文存于 etcd，且通常比 Secret 更容易被读到 | 需要自定义 parameters 时改用 Secret 挂载；**不要**把口令写进 `parameters.content` |
+| Chart 托管 Secret（`database.password`） | Chart 生成的 Secret，`stringData` 写入 `data`（base64） | 正常用法；注意 `stringData` 只合并不删键（见上） |
+
+另外，生成的 `files/config/parameters.php` 位于 PVC 上，入口脚本不会覆盖已存在的文件；
+该目录已由镜像层 Apache 配置拒绝 HTTP 访问（见
+[docs/known-issues.md](../../docs/known-issues.md) 的 P5）。

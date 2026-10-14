@@ -24,6 +24,9 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "projeqtor.serviceAccountName" . }}
+      # ProjeQtOr never talks to the Kubernetes API, so the projected service
+      # account token is an unnecessary exposure: do not mount it.
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

@@ -37,6 +37,11 @@ on:
         type: boolean
         default: false
 
+# Least privilege by default: every job gets a read-only token unless it
+# declares otherwise (the build job needs `packages: write` to push).
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: zzhkhyl/projeqtor
@@ -50,6 +55,10 @@ jobs:
   detect:
     name: Detect ProjeQtOr version
     runs-on: ubuntu-latest
+    # Reads the ghcr tag list to decide whether a build is needed (read only).
+    permissions:
+      contents: read
+      packages: read
     outputs:
       version: ${{ steps.detect.outputs.version }}
       is_latest: ${{ steps.detect.outputs.is_latest }}
