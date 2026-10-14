@@ -39,9 +39,14 @@
 | 触发条件 | 行为 |
 |---|---|
 | `schedule`（每日 06:00 UTC） | 探测上游最新版本，ghcr 没有该版本 tag 才构建 |
-| `push` 到 `main` | 重新构建并更新 `latest` |
-| `pull_request` | 仅构建 amd64 验证，不登录、不推送 |
+| `push` 到 `main`（仅镜像输入变更） | 重新构建并更新 `latest` |
+| `pull_request`（仅镜像输入变更） | 仅构建 amd64 验证，不登录、不推送 |
 | `workflow_dispatch` | 手动构建，可指定版本号（如 `12.1.0`）或强制重建 |
+
+**只有镜像输入变更时才构建**：`docker/**`、`.dockerignore` 以及工作流自身
+（`.github/workflows/docker-image.yml`）。`docs/`、`charts/`、`README` 等文档类改动
+不会触发多架构构建（镜像内容与它们无关），`workflow_dispatch` 不受此限制。
+新增被 Dockerfile `COPY` 或影响构建上下文的文件时，需同步加入工作流的 `paths`。
 
 镜像标签规则：
 

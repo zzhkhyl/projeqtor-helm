@@ -2,16 +2,30 @@ name: Build and Push Docker Image
 
 # 触发条件：
 #   schedule           每日自动检查 SourceForge 上的 ProjeQtOr 新版本（仅在有新版本时构建）
-#   push (main)        仓库内容（Dockerfile / 工作流）变更时重建并更新 latest
-#   pull_request       仅构建验证，不登录、不推送镜像
-#   workflow_dispatch  手动构建，可指定版本号或强制重建
+#   push (main)        仅当镜像输入变更时重建并更新 latest（见下方 paths）
+#   pull_request       仅构建验证，不登录、不推送镜像（同样受 paths 限制）
+#   workflow_dispatch  手动构建，可指定版本号或强制重建（不受 paths 限制）
+#
+# 关于 paths：镜像内容只由 docker/ 下的文件与 .dockerignore（构建上下文）决定，
+# 因此只有这些输入变更时才构建 —— docs/、charts/、README 等文档类改动不再触发
+# 多架构构建。工作流自身也列入 paths，这样修改 CI 配置时能立刻得到一次验证；
+# 若希望连工作流变更也不触发（改为纯 workflow_dispatch 验证），删掉最后一行即可。
+# 注意：将来若新增被 Dockerfile COPY 或影响构建上下文的文件，请同步加入 paths。
 on:
   schedule:
     - cron: '0 6 * * *'
   push:
     branches: [main]
+    paths:
+      - 'docker/**'
+      - '.dockerignore'
+      - '.github/workflows/docker-image.yml'
   pull_request:
     branches: [main]
+    paths:
+      - 'docker/**'
+      - '.dockerignore'
+      - '.github/workflows/docker-image.yml'
   workflow_dispatch:
     inputs:
       version:
