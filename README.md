@@ -70,6 +70,12 @@ helm install projeqtor ./charts/projeqtor \
 升级 / 卸载及完整参数说明见
 [charts/projeqtor/README.md](charts/projeqtor/README.md)。
 
+> **数据库不在本 Chart 内**：Chart 不会创建 MySQL/PostgreSQL 实例，也不包含任何
+> 数据库镜像与存储，需自备（Chart 只注入 `PQ_DB_*` 环境变量并按需管理口令 Secret）。
+> 自建口令 Secret 时 `POSTGRES_PASSWORD` 与 `PQ_DB_PASSWORD` 的语义、以及口令
+> 轮换顺序见
+> [数据库与 Secret](charts/projeqtor/README.md#数据库与-secret重要)。
+
 ### 本地 Docker 运行
 
 ```bash

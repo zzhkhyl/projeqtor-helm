@@ -26,6 +26,7 @@
 | [N1](#n1--aes-加密类脱离框架不可用) | AES 加密类依赖 `pq_ord()` / `pq_substr()`，脱离框架无法直接调用 | 排查注意 | — | 仅影响外部调试脚本 | ⚪ |
 | [N2](#n2--session-激活后无法再改-session-id) | `session_start()` 之后再调 `session_id()` 会报错 | 排查注意 | — | 仅影响外部调试脚本 | ⚪ |
 | [N3](#n3--用户表名为-resource-而非-user) | 用户数据存于 `resource` 表，不存在 `user` 表 | 排查注意 | — | 仅影响 SQL 排查 | ⚪ |
+| [N4](#n4--数据库不在-chart-内--自建-secret-的双键语义) | 数据库不在 Chart 内；自建 Secret 的 `POSTGRES_PASSWORD` / `PQ_DB_PASSWORD` 语义与轮换约束 | 部署知识 | — | 所有自备数据库的部署 | ⚪ |
 
 **总体结论**：本次部署**功能正常**（全新安装、数据库升级、`admin/admin` 真实 HTTP 登录均验证通过），
 未发现由本仓库的 Helm Chart 或镜像构建引入的功能性缺陷。P1、P2 来自上游 ProjeQtOr 自身且都不阻断
@@ -275,6 +276,39 @@ ProjeQtOr 的用户（含 `admin`）存于 **`resource`** 表，数据库中**�
 且 `password = md5('admin') = <已省略>` —— 说明「salt 为空 + crypto=md5」
 是默认安装的正常形态，登录是**真实口令校验通过**，而非绕过。
 
+### N4 · 数据库不在 Chart 内 + 自建 Secret 的双键语义
+
+**Chart 不含数据库部署与数据库镜像**。`helm template` 的渲染结果只有 ConfigMap /
+Deployment / Service / Ingress / ServiceAccount / 应用侧 PVC（外加可选的 Secret 与
+CronJob）；模板中的 `image:` 只有两处 —— 应用镜像（`deployment.yaml`）与 CronJob 保活
+用的 `alpine:3.20`（`cronjob.yaml`），**没有**任何 PG/MySQL 镜像。本集群的
+`projeqtor-postgres`（镜像 `<私有镜像仓库>/library/postgres:17.10-bookworm`，
+PVC `projeqtor-postgres-data`）是独立 `kubectl apply` 创建的：无 Helm 标签、无
+`ownerReferences`，不属于 release。
+
+`values.yaml` 默认 `env.PQ_DB_TYPE: mysql` + `env.PQ_DB_HOST: projeqtor-mysql` 只是命名
+约定，Chart 不会创建它 —— 数据库未就绪就部署会连接失败，而 Pod 仍会 Ready，因为
+`docker/healthz.php` 刻意不加载框架、不依赖数据库。
+
+**自建 Secret 时的双键语义**（以 PostgreSQL 为例）：
+
+| 键 | 谁读 | 生效时机 |
+|---|---|---|
+| `POSTGRES_PASSWORD` | 数据库容器的 `POSTGRES_PASSWORD`（`secretKeyRef`） | **仅首次 initdb**；既有 PGDATA 之后不再读它 |
+| `PQ_DB_PASSWORD` | 应用容器（`envFrom` 整个 Secret → `parameters.php` 的 `$paramDbPassword`） | **每次启动都读** |
+
+* 两键**不必强制相等**，但建议保持一致；唯一硬约束是 `PQ_DB_PASSWORD` 必须等于数据库里
+  该角色的当前口令（本实例两键同值，已用 sha256 校验）。
+* **只改 `POSTGRES_PASSWORD` 等于没改**：应用不读它，它只是被 `envFrom` 顺带注入成一个
+  无用环境变量；应用连接参数只由 `PQ_DB_PASSWORD` 决定。
+* **两键不一致 + 数据库 PVC 重建**（PGDATA 为空）→ 容器用陈旧值初始化 → 应用认证失败。
+* 改用 Chart 托管口令时（`database.password` 且 `existingSecret` 留空），Chart 只生成
+  `PQ_DB_PASSWORD` 一个键，不存在双键问题。
+* `stringData` 只合并、不删除 `data` 中的旧键（已实测，见下方操作说明）。
+
+完整的操作步骤（轮换顺序、`ALTER USER`、`stringData` 删键的显式 patch）见
+`charts/projeqtor/README.md` 的「数据库与 Secret（重要）」章节。
+
 ---
 
 ## 4. 登录验证方法（可复现）
@@ -324,6 +358,16 @@ RESULT: LOGIN SUCCESS (admin/admin)
   （正常启动时打印三条 `N row(s) realigned` 与最终结论）。
 * **确认镜像是否真的更新**：比对 `kubectl -n projeqtor get pod -o jsonpath='{.status.containerStatuses[0].imageID}'`
   与 ghcr 上该 tag 的 digest；注意 [P3](#p3--可变版本-tag--ifnotpresent导致镜像更新不生效)。
+* **Chart 与数据库的边界**：Chart 不含任何数据库工作负载与镜像（渲染证据见
+  [N4](#n4--数据库不在-chart-内--自建-secret-的双键语义)）；本集群数据库为独立
+  Deployment `projeqtor-postgres`（PVC `projeqtor-postgres-data`），不属于 Helm release。
+* **Secret 键语义与口令轮换**：见 [N4](#n4--数据库不在-chart-内--自建-secret-的双键语义)
+  与 `charts/projeqtor/README.md` 的「数据库与 Secret（重要）」章节；当前实例
+  `POSTGRES_PASSWORD` 与 `PQ_DB_PASSWORD` 同值（sha256 已校验）。
+* **k3s 主机上的交付物**（仓库之外）：`<主机上的部署 values>`（部署 values）、
+  `<主机上的 Secret 导出>`（Secret 导出记录）、`<主机上的明文 Secret>`
+  （`stringData` 明文版，可直接编辑 apply）、`<主机上的 chart 副本>`（升级用 chart）、
+  `<主机上的 TLS 证书文件>`（Ingress TLS 证书权威文件）。
 
 ---
 
@@ -347,3 +391,4 @@ RESULT: LOGIN SUCCESS (admin/admin)
 |---|---|
 | 2026-10-14 | 首次建立：记录 P1、P2 与 N1–N3，附部署与登录验证基线 |
 | 2026-10-14 | 执行 P1 处置：本实例数据回填（0 行）+ 新增幂等启动自愈脚本 `PQ_PG_REPAIR`（6 用例验证通过）；新增 P3（可变版本 tag + `IfNotPresent`）；修复 `configmap.yaml` 仅渲染固定 env 键导致新增键静默失效的问题；补全验证矩阵与生效前提 |
+| 2026-10-14 | 新增 [N4](#n4--数据库不在-chart-内--自建-secret-的双键语义)：Chart 不含数据库部署与镜像（附渲染证据）、自建 Secret 的双键语义与轮换约束；chart README 增加「数据库与 Secret（重要）」章节；根 README 增加数据库归属提示；环境事实补充 k3s 主机交付物清单 |

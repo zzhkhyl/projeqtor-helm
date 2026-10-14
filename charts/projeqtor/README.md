@@ -110,12 +110,84 @@ kubectl -n projeqtor delete pvc projeqtor-files
 
 ## 配置说明
 
-- **数据库**：本 Chart 不包含数据库。ProjeQtOr 使用外部
-  MySQL/MariaDB/PostgreSQL，通过 `env.PQ_DB_*` + `database.password` 配置。
-  容器首次启动时会将其写入 `files/config/parameters.php`（位于 PVC 上，
-  重复启动/升级不会覆盖）。
+- **数据库**：本 Chart **不含**任何数据库工作负载与数据库镜像（不会创建
+  MySQL/PostgreSQL 实例、PVC 或镜像配置），需你自备并自行运维。Chart 只把
+  `env.PQ_DB_*` 注入容器，由入口脚本写入 `files/config/parameters.php`（位于 PVC 上，
+  重复启动/升级不会覆盖）。详见 [数据库与 Secret](#数据库与-secret重要)。
 - **持久化**：`files/` 目录（附件、日志、报告、生成的配置）整体挂载 PVC。
   单副本可用 `ReadWriteOnce`；多副本必须使用 `ReadWriteMany`
   （NFS、CephFS、Longhorn 等），因为附件与 PHP session 在 Pod 间共享。
 - **安全**：容器以 `www-data`（uid 33）非 root 运行，Apache 监听 8080，
   已丢弃全部 Linux capabilities。
+
+## 数据库与 Secret（重要）
+
+### Chart 不包含数据库
+
+渲染结果只有 ConfigMap、Deployment、Service、Ingress、ServiceAccount、应用侧 PVC，
+以及（可选）口令 Secret 与 CronJob。**不存在** MySQL/PostgreSQL 的镜像、
+StatefulSet、Deployment、Service 或 PVC —— 数据库的镜像、版本、副本、备份、
+存储全部在 Chart 之外。
+
+Chart 对数据库只做两件事：
+
+1. 把 `env.PQ_DB_*` 注入应用容器，由入口脚本写入 `files/config/parameters.php`；
+2. 按需引用或创建口令 Secret（见下）。
+
+> **注意默认值**：`values.yaml` 默认 `env.PQ_DB_TYPE: mysql` +
+> `env.PQ_DB_HOST: projeqtor-mysql`，这只是命名约定，**Chart 不会创建它**。
+> 数据库未就绪就部署，应用会连接失败（Pod 仍会 Ready，因为健康检查端点
+> `healthz.php` 不加载框架、不依赖数据库）。
+
+### 口令 Secret 的两种模式
+
+| 模式 | 配置 | Secret 内容 | 谁创建 |
+|---|---|---|---|
+| 引用已有 Secret（推荐） | `database.existingSecret` + `database.existingSecretKey` | 必须含 `PQ_DB_PASSWORD` | 你自行创建 |
+| Chart 托管 | `database.password`（`existingSecret` 留空） | Chart 只生成 `PQ_DB_PASSWORD` 一个键 | Chart |
+
+两种模式下，应用都是通过 `envFrom` 取 Secret 中的 `PQ_DB_PASSWORD`，
+再由它生成 `parameters.php` 的 `$paramDbPassword`。
+
+### 自建 Secret 时的双键语义（以 PostgreSQL 为例）
+
+| 键 | 谁读 | 生效时机 |
+|---|---|---|
+| `POSTGRES_PASSWORD` | 数据库容器的 `POSTGRES_PASSWORD`（`secretKeyRef`） | **仅首次 initdb** 写入初始口令；既有 PGDATA 之后不再读它 |
+| `PQ_DB_PASSWORD` | 应用容器（`envFrom` 整个 Secret） | **每次启动都读**，必须始终等于数据库中该角色的当前口令 |
+
+由此有三条容易踩坑的结论：
+
+1. **两键不必强制相等，但强烈建议保持一致**。唯一的硬约束是：
+   `PQ_DB_PASSWORD` 必须等于数据库里该角色的当前口令。
+2. **只改 `POSTGRES_PASSWORD` 等于没改**：应用并不读它（它只是被 `envFrom`
+   顺带注入成一个无用环境变量），应用连接参数只由 `PQ_DB_PASSWORD` 决定。
+   反过来，只改 `PQ_DB_PASSWORD` 而不改数据库，应用会立刻认证失败。
+3. **两键不一致的隐患**：若数据库 PVC 被删除或重建（PGDATA 为空），容器会用
+   Secret 中那个陈旧（可能已过期）的 `POSTGRES_PASSWORD` 重新初始化，与应用的
+   `PQ_DB_PASSWORD` 不一致 → 应用连接失败。因此轮换时两键都应更新。
+
+### 口令轮换顺序（不能颠倒）
+
+PostgreSQL 的用户口令只在首次 initdb 时由 `POSTGRES_PASSWORD` 写入，此后改 Secret
+不会改变数据库中的实际口令。正确顺序：
+
+```bash
+# 1) 生成新口令
+NEWPW=$(openssl rand -base64 24)
+# 2) 先在数据库里改（这一步才真正改变口令）
+kubectl -n <ns> exec -i deploy/<postgres> -- \
+  psql -U <user> -d <db> -c "ALTER USER <user> PASSWORD '$NEWPW';"
+# 3) 更新 Secret：POSTGRES_PASSWORD 与 PQ_DB_PASSWORD 都改为新口令
+# 4) 应用 Secret
+kubectl apply -f secret.yaml
+# 5) 滚动重启应用（数据库 Deployment 的 POSTGRES_PASSWORD 只影响全新初始化，
+#    已有 PGDATA 不受影响；为保持 Secret 与配置一致可一并重启）
+kubectl -n <ns> rollout restart deploy/<release>
+# 6) 验证：访问 UI 登录，并观察 Pod 就绪
+```
+
+> **`stringData` 的坑（已实测）**：`stringData` 是"只写"字段，apply 时只会**合并**
+> 进 `data`，不会删除 `data` 中的旧键。实测：先 apply `{A,B}`，再 apply 只含 `{A}`
+> 的版本，`data` 中的 `B` 依然存在。需要删键时必须显式执行
+> `kubectl patch secret <name> --type=json -p='[{"op":"remove","path":"/data/<KEY>"}]'`。
