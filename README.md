@@ -117,8 +117,10 @@ Helm Chart 提供可选的 CronJob（`cronJob.enabled=true`），在 Pod 重启�
 
 ## 多副本注意
 
-`files/`（附件、日志、PHP session）在 Pod 间共享，副本数 > 1 时必须使用
-`ReadWriteMany` 存储（`persistence.accessModes`）。
+`files/`（附件、内嵌图片、缩略图、报告、日志、cron 标志、PHP 会话）整体位于同一个
+卷上，副本数 > 1 时必须使用 `ReadWriteMany` 存储（`persistence.accessModes`），
+否则请求落到不同 Pod 会导致附件不可见、登录态丢失。PHP 文件会话使用建议性锁，
+NFS 上的并发写保证弱于本地文件系统，严格的多副本场景建议改用数据库会话或会话粘性。
 
 ## 已知问题
 

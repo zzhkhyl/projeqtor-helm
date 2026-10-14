@@ -114,9 +114,14 @@ kubectl -n projeqtor delete pvc projeqtor-files
   MySQL/PostgreSQL 实例、PVC 或镜像配置），需你自备并自行运维。Chart 只把
   `env.PQ_DB_*` 注入容器，由入口脚本写入 `files/config/parameters.php`（位于 PVC 上，
   重复启动/升级不会覆盖）。详见 [数据库与 Secret](#数据库与-secret重要)。
-- **持久化**：`files/` 目录（附件、日志、报告、生成的配置）整体挂载 PVC。
-  单副本可用 `ReadWriteOnce`；多副本必须使用 `ReadWriteMany`
-  （NFS、CephFS、Longhorn 等），因为附件与 PHP session 在 Pod 间共享。
+- **持久化**：`files/` 目录整体挂载 PVC，内含附件（`attach/`）、内嵌图片
+  （`images/`）、缩略图（`thumbs/`）、报告（`report/`）、日志（`logs/`）、
+  cron 标志（`cron/`）、**PHP 会话（`session/`）** 与生成的配置
+  （`config/parameters.php`）。单副本可用 `ReadWriteOnce`；多副本必须使用
+  `ReadWriteMany`（NFS、CephFS、Longhorn 等），因为附件与会话都在这个卷上。
+  会话目录由入口脚本创建，并写入 `.htaccess` 拒绝 HTTP 访问（会话文件仅由
+  PHP 通过文件系统读写）。注意 PHP 文件会话使用建议性锁，NFS 上的并发保证
+  弱于本地文件系统，严格的多副本场景建议改用数据库会话或会话粘性。
 - **安全**：容器以 `www-data`（uid 33）非 root 运行，Apache 监听 8080，
   已丢弃全部 Linux capabilities。
 

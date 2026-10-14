@@ -4,7 +4,9 @@
 #
 # Responsibilities:
 #   1. Make sure the writable directories under files/ exist (a freshly
-#      attached volume hides the ones baked into the image).
+#      attached volume hides the ones baked into the image), including the PHP
+#      session directory, which is denied over HTTP. Sessions are kept on the
+#      volume on purpose: see docs/known-issues.md (issue P4).
 #   2. Generate files/config/parameters.php from the PQ_DB_* environment
 #      variables when no configuration exists yet. An existing file is never
 #      overwritten, so `helm upgrade` keeps a working configuration.
@@ -34,9 +36,19 @@ php_escape() {
 }
 
 # --- 1. Writable directories -------------------------------------------------
-for dir in attach config logs report images thumbs import cron; do
+for dir in attach config logs report images thumbs import cron session; do
     mkdir -p "${APP_ROOT}/files/${dir}" || log "WARNING: cannot create files/${dir}"
 done
+
+# --- 1b. Keep the session directory out of reach over HTTP --------------------
+# session.save_path points here (see the Dockerfile). PHP reads and writes these
+# files through the filesystem, so denying HTTP access costs nothing. The base
+# image already sets "Options -Indexes" for /var/www/, this additionally blocks
+# direct requests to a known session file name.
+if [ -d "${APP_ROOT}/files/session" ] && [ ! -f "${APP_ROOT}/files/session/.htaccess" ]; then
+    printf 'Require all denied\n' > "${APP_ROOT}/files/session/.htaccess" \
+        || log "WARNING: cannot write files/session/.htaccess"
+fi
 
 # --- 2. Database configuration from environment ------------------------------
 if [ -f "${PARAMETERS_FILE}" ]; then

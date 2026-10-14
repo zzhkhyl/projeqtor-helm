@@ -23,16 +23,17 @@
 | [P1](#p1--postgresql-下-v1301-升级脚本执行失败) | PostgreSQL 下 `V13.0.1` 升级脚本 3 条语句执行失败（MySQL 专有多表 `UPDATE`） | 上游缺陷 | 中 | 从 ≤13.0.0 升级且已有 `subtask` 数据的 PG 实例 | 🟢 已缓解 |
 | [P2](#p2--缺少-user-agent-时请求被中断) | 缺失 `User-Agent` 的请求被应用错误处理器中断 | 上游缺陷 | 低 | 无头 HTTP 客户端（不含浏览器、不含本 Chart 探针） | 🟡 |
 | [P3](#p3--可变版本-tag--ifnotpresent导致镜像更新不生效) | 可变版本 tag + `IfNotPresent`，导致镜像变更不会落到既有部署 | 交付侧 | 中 | 所有已部署实例在镜像重建后的升级 | 🟢 已缓解（本实例采用方案 1） |
+| [P4](#p4--php-会话不在-pvc-上多副本不共享pod-重建掉登录) | `session.save_path` 未设置，PHP 会话落在容器 `/tmp`：Pod 重建即掉登录、多副本不共享 | 交付侧 | 中 | 所有实例（单副本升级掉登录；多副本共享失效） | 🟢 已修复（代码侧，待镜像重建生效） |
 | [N1](#n1--aes-加密类脱离框架不可用) | AES 加密类依赖 `pq_ord()` / `pq_substr()`，脱离框架无法直接调用 | 排查注意 | — | 仅影响外部调试脚本 | ⚪ |
 | [N2](#n2--session-激活后无法再改-session-id) | `session_start()` 之后再调 `session_id()` 会报错 | 排查注意 | — | 仅影响外部调试脚本 | ⚪ |
 | [N3](#n3--用户表名为-resource-而非-user) | 用户数据存于 `resource` 表，不存在 `user` 表 | 排查注意 | — | 仅影响 SQL 排查 | ⚪ |
 | [N4](#n4--数据库不在-chart-内--自建-secret-的双键语义) | 数据库不在 Chart 内；自建 Secret 的 `POSTGRES_PASSWORD` / `PQ_DB_PASSWORD` 语义与轮换约束 | 部署知识 | — | 所有自备数据库的部署 | ⚪ |
 
-**总体结论**：本次部署**功能正常**（全新安装、数据库升级、`admin/admin` 真实 HTTP 登录均验证通过），
-未发现由本仓库的 Helm Chart 或镜像构建引入的功能性缺陷。P1、P2 来自上游 ProjeQtOr 自身且都不阻断
-部署与使用；P1 已在本仓库侧提供幂等自愈缓解（见 P1「处置记录」）。P3 是交付侧的升级生效性问题，
-本身不阻断实例运行，但会让「重建镜像」的操作看起来无效；本实例已按方案 1（固定不可变 tag）
-部署并验证生效（见 P3「处置记录」），而 chart 与 CI 的默认行为未变 —— 新部署仍可能踩到该问题。
+**总体结论**：本次部署**功能正常**（全新安装、数据库升级、`admin/admin` 真实 HTTP 登录均验证通过）。
+P1、P2 来自上游 ProjeQtOr 自身且都不阻断部署与使用；P1 已在本仓库侧提供幂等自愈缓解
+（见 P1「处置记录」）。P3 与 P4 属于本仓库交付侧：P3 是升级生效性问题，本实例已按方案 1
+（固定不可变 tag）部署并验证生效，而 chart 与 CI 的默认行为未变 —— 新部署仍可能踩到；
+P4 是「PHP 会话不在 PVC 上」，已在镜像与入口脚本侧修复，待重建镜像后生效与验证。
 
 ---
 
@@ -263,6 +264,79 @@ Pod 重建也不会拉取新镜像 —— 镜像变更静默不生效。
 
 ---
 
+### P4 · PHP 会话不在 PVC 上（多副本不共享、Pod 重建掉登录）
+
+**严重度**：中（单副本下表现为「升级即全员掉登录」；多副本下 chart 声明的
+RWX 共享能力实际不成立）
+**归属**：本仓库交付侧（镜像 / 入口脚本 / 文档）
+**状态**：🟢 已修复（镜像侧 + 入口脚本，已在本地基镜像实测验证；**待重建镜像并滚动更新，
+以在 k3s 上确认 Pod 重建后登录态保留**）
+
+#### 现象
+
+* Pod 重建（含 `helm upgrade` 滚动更新）后，所有已登录用户的会话丢失，需要重新登录。
+* 多副本部署时，附件等经 `ReadWriteMany` 共享正常，但登录会在请求落到另一个 Pod
+  时失效 —— 即「用 RWX 存储 `files/` 即可支持多副本」的既有说法并不成立。
+
+#### 证据（基镜像 `php:8.1-apache-bookworm` 实测）
+
+```
+session.save_path=[]                      # 空值 → PHP 回落到 sys_get_temp_dir()
+session.save_handler=files
+Loaded Configuration File: (none)          # 官方 php 镜像不加载任何 php.ini
+/var/lib/php/sessions: No such file or directory
+/tmp: drwxrwxrwt root root                # 可写，但属于容器可写层
+```
+
+#### 根因
+
+镜像与本仓库的 ini 都未设置 `session.save_path`，PHP 于是把会话文件写入
+`/tmp` —— 那是**容器可写层**（节点上的 overlayfs 上层目录），既不在 PVC 上，
+也不在节点本地 PV 上；每个 Pod 各写各的，Pod 一重建即消失。本仓库 4 处文档
+（`values.yaml`、chart README、根 README）曾声明「PHP session 在 Pod 间共享」，
+与实现不符。
+
+#### 修复
+
+* `docker/Dockerfile`：`zz-projeqtor.ini` 增加
+  `session.save_path=/var/www/html/files/session`；把 `files/session` 加入镜像内
+  预创建的可写目录（随后 `chown -R www-data:www-data`）。
+* `docker/docker-entrypoint.sh`：运行时创建 `files/session`（PVC 挂载会遮住镜像内
+  的目录），并写入 `.htaccess`（`Require all denied`）。
+* 文档：`values.yaml`、chart README、根 README 的会话说明改为与实现一致。
+
+#### 修复验证（本地基镜像实测 `php:8.1-apache-bookworm`）
+
+按修复后的配置（ini + 目录 + `.htaccess`）实测：`session.save_path` 生效、会话真实写入
+该目录、HTTP 侧不可达。对照矩阵：
+
+| 场景 | 直接请求会话文件 | 请求目录（无索引文件） |
+|---|---|---|
+| 无 `.htaccess` | **200**（知道文件名即可下载 → 会话劫持向量） | 403 |
+| 有 `.htaccess` | 403 | 403 |
+
+* 目录列表 403 来自基镜像 `docker-php.conf` 的 `Options -Indexes`（Apache 日志：
+  `server-generated directory index forbidden by Options directive`），即**无法枚举**
+  会话文件名 —— 这也是加 `.htaccess` 仍然必要的原因：仅靠目录保护挡不住「已知文件名」。
+* `.htaccess` 生效由 Apache 日志确认：`client denied by server configuration:
+  /var/www/html/files/session/sess_…`（同时说明 `AllowOverride All` 有效）。
+* `.htaccess` 存在时 PHP 仍能正常读写会话（纯文件系统操作，不经 HTTP）。
+* 附带发现：该目录必须由以 `www-data` 运行的入口脚本创建（镜像 `USER www-data`）。
+  若目录为 root 拥有且 0755，会出现
+  `session_start(): open(...) failed: Permission denied`，登录直接不可用。
+
+#### 残留注意
+
+* PHP 文件会话使用**建议性锁**，NFS 上的并发写保证弱于本地文件系统。本修复解决的是
+  「会话丢失」与「跨 Pod 不共享」，**不**改变「多 Pod 并发写同一会话文件」的锁语义；
+  严格的多副本场景建议改用数据库会话或会话粘性。
+* 会话文件位于文档根内（`files/session/`）。基镜像的 `docker-php.conf` 已对
+  `/var/www/` 设 `Options -Indexes`（目录无法枚举），叠加 `.htaccess` 后 HTTP 侧
+  不可达；会话文件只由 PHP 通过文件系统读写。
+* 升级到本修复的镜像会让现有登录态失效一次（会话路径变更），属预期。
+
+---
+
 ### N1 · AES 加密类脱离框架不可用
 
 在容器内编写独立脚本复现登录流程时，`AesCtr::encrypt()` 报
@@ -397,6 +471,7 @@ RESULT: LOGIN SUCCESS (admin/admin)
 | 5 | 是否用 MySQL/MariaDB 做一次对照实测（同一套 Chart、同样全新安装，检查 `WITH N ERRORS`） | P1 | 待决定 |
 | 6 | 让自愈逻辑真正生效：等 CI 用新代码重建镜像并完成滚动更新（受 P3 影响） | P1 / P3 | ✅ 已完成（2026-10-14；以 `sha-8a050b3` 滚动更新，启动日志出现 4 行 `[projeqtor-pg-repair]`、`PQ_PG_REPAIR=true`） |
 | 7 | 选择 P3 的处置方式（不可变 tag / `Always` / CI 不覆盖版本 tag） | P3 | ✅ 已完成（2026-10-14；采用方案 1 固定不可变 tag，见 P3「处置记录」） |
+| 8 | 重建镜像并在 k3s 上验证 P4 修复（Pod 重建后登录态保留；多副本下会话跨 Pod 共享） | P4 | 待执行（代码与文档已改、本地基镜像实测通过；需 CI 构建新镜像并更新部署 tag） |
 
 ---
 
@@ -408,3 +483,4 @@ RESULT: LOGIN SUCCESS (admin/admin)
 | 2026-10-14 | 执行 P1 处置：本实例数据回填（0 行）+ 新增幂等启动自愈脚本 `PQ_PG_REPAIR`（6 用例验证通过）；新增 P3（可变版本 tag + `IfNotPresent`）；修复 `configmap.yaml` 仅渲染固定 env 键导致新增键静默失效的问题；补全验证矩阵与生效前提 |
 | 2026-10-14 | 新增 [N4](#n4--数据库不在-chart-内--自建-secret-的双键语义)：Chart 不含数据库部署与镜像（附渲染证据）、自建 Secret 的双键语义与轮换约束；chart README 增加「数据库与 Secret（重要）」章节；根 README 增加数据库归属提示；环境事实补充 k3s 主机交付物清单 |
 | 2026-10-14 | CI 增加 `paths` 过滤（仅 `docker/**`、`.dockerignore`、工作流自身触发），并以纯文档提交实测确认不再触发构建（该提交无 Actions 运行，对照的工作流变更提交触发 run #5 构建成功）；P3 处置：本实例改用固定不可变 tag `sha-8a050b3` 滚动更新并验证生效，状态 🟡 → 🟢，摘要表 / 总体结论 / 待决事项 / 验证基线同步更新 |
+| 2026-10-14 | 新增 [P4](#p4--php-会话不在-pvc-上多副本不共享pod-重建掉登录)：实测基镜像确认 `session.save_path` 为空、会话落在容器 `/tmp`（不在 PVC）；修复为镜像 ini 指向 `files/session` + 入口脚本创建该目录并写入 `.htaccess`；修正 `values.yaml` / chart README / 根 README 共 4 处错误的「会话在 Pod 间共享」说法；摘要表、总体结论、待决事项新增相应条目 |

@@ -2,8 +2,12 @@
 # Every value can be overridden with `--set` or a custom values file.
 
 # -- Number of ProjeQtOr pods.
-# NOTE: more than 1 replica requires ReadWriteMany storage for `files/`
-# (attachments and PHP sessions are shared between pods).
+# NOTE: more than 1 replica requires ReadWriteMany storage for `files/`.
+# Attachments and PHP sessions both live under `files/` (sessions are placed
+# there via `session.save_path` in the image), so RWX storage makes them shared.
+# Residual caveat: PHP's file session handler uses advisory locking, which is
+# weaker on NFS than on a local filesystem - for strict multi-replica setups
+# prefer database-backed sessions or session affinity.
 replicaCount: 1
 
 image:
@@ -98,7 +102,8 @@ ingress:
   tls: []
 
 persistence:
-  # -- Store files/ (attachments, logs, generated parameters.php) on a PVC.
+  # -- Store files/ on a PVC: attachments, embedded images, thumbnails, reports,
+  # logs, cron flags, PHP sessions and the generated parameters.php.
   enabled: true
   # -- Use an existing PVC instead of creating one.
   existingClaim: ""

@@ -85,6 +85,10 @@ RUN set -eux; \
         curl
 
 # --- PHP runtime tuning (values advised by ProjeQtOr readme.txt) -----------
+# session.save_path is deliberately set inside files/ (the persistent volume).
+# Otherwise PHP falls back to sys_get_temp_dir() = /tmp, which lives in the
+# container's writable layer: sessions would then be lost on every pod restart
+# and could not be shared between replicas. See docs/known-issues.md (issue P4).
 RUN set -eux; \
     { \
         echo "memory_limit=512M"; \
@@ -94,6 +98,7 @@ RUN set -eux; \
         echo "post_max_size=64M"; \
         echo "file_uploads=On"; \
         echo "session.auto_start=0"; \
+        echo "session.save_path=/var/www/html/files/session"; \
         echo "default_charset=UTF-8"; \
         echo "date.timezone=UTC"; \
         echo "opcache.enable=1"; \
@@ -142,6 +147,7 @@ RUN set -eux; \
         "${APP_ROOT}/files/thumbs" \
         "${APP_ROOT}/files/import" \
         "${APP_ROOT}/files/cron" \
+        "${APP_ROOT}/files/session" \
         "${APP_ROOT}/cache"; \
     chown -R www-data:www-data "${APP_ROOT}"
 
