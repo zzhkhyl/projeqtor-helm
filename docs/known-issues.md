@@ -23,9 +23,9 @@
 | [P1](#p1--postgresql-下-v1301-升级脚本执行失败) | PostgreSQL 下 `V13.0.1` 升级脚本 3 条语句执行失败（MySQL 专有多表 `UPDATE`） | 上游缺陷 | 中 | 从 ≤13.0.0 升级且已有 `subtask` 数据的 PG 实例 | 🟢 已缓解 |
 | [P2](#p2--缺少-user-agent-时请求被中断) | 缺失 `User-Agent` 的请求被应用错误处理器中断 | 上游缺陷 | 低 | 无头 HTTP 客户端（不含浏览器、不含本 Chart 探针） | 🟡 |
 | [P3](#p3--可变版本-tag--ifnotpresent导致镜像更新不生效) | 可变版本 tag + `IfNotPresent`，导致镜像变更不会落到既有部署 | 交付侧 | 中 | 所有已部署实例在镜像重建后的升级 | 🟢 已缓解（本实例采用方案 1） |
-| [P4](#p4--php-会话不在-pvc-上多副本不共享pod-重建掉登录) | `session.save_path` 未设置，PHP 会话落在容器 `/tmp`：Pod 重建即掉登录、多副本不共享 | 交付侧 | 中 | 所有实例（单副本升级掉登录；多副本共享失效） | 🟢 已修复（代码侧，待镜像重建生效） |
-| [P5](#p5--files-目录可被-http-直读日志未认证可读附件绕过下载令牌) | `files/` 位于文档根内且未限制访问：日志未认证可读、附件绕过下载令牌 | 交付侧 | 中高 | 所有实例 | 🟢 已修复（代码侧，待镜像重建生效） |
-| [P6](#p6--数据库未初始化时入口脚本生成的-parametersphp-不完整全站-0-字节白屏) | 数据库未初始化时生成残缺的 `parameters.php`（缺 `logFile`），`logTracing()` 直接 `exit()` → 全站 200 + 0 字节，且永远到不了登录页因而无法自愈 | 交付侧 | 高 | 所有数据库尚未初始化的实例（全新部署首次启动） | 🟢 已修复（代码侧，待镜像重建生效；本实例已实测恢复） |
+| [P4](#p4--php-会话不在-pvc-上多副本不共享pod-重建掉登录) | `session.save_path` 未设置，PHP 会话落在容器 `/tmp`：Pod 重建即掉登录、多副本不共享 | 交付侧 | 中 | 所有实例（单副本升级掉登录；多副本共享失效） | 🟢 已修复并验证（`sha-54d0224`：会话已落 PVC） |
+| [P5](#p5--files-目录可被-http-直读日志未认证可读附件绕过下载令牌) | `files/` 位于文档根内且未限制访问：日志未认证可读、附件绕过下载令牌 | 交付侧 | 中高 | 所有实例 | 🟢 已修复并验证（`sha-54d0224`：敏感子目录全部 403） |
+| [P6](#p6--数据库未初始化时入口脚本生成的-parametersphp-不完整全站-0-字节白屏) | 数据库未初始化时生成残缺的 `parameters.php`（缺 `logFile`），`logTracing()` 直接 `exit()` → 全站 200 + 0 字节，且永远到不了登录页因而无法自愈 | 交付侧 | 高 | 所有数据库尚未初始化的实例（全新部署首次启动） | 🟢 已修复并验证（`sha-54d0224`：含空库全新卷场景） |
 | [N1](#n1--aes-加密类脱离框架不可用) | AES 加密类依赖 `pq_ord()` / `pq_substr()`，脱离框架无法直接调用 | 排查注意 | — | 仅影响外部调试脚本 | ⚪ |
 | [N2](#n2--session-激活后无法再改-session-id) | `session_start()` 之后再调 `session_id()` 会报错 | 排查注意 | — | 仅影响外部调试脚本 | ⚪ |
 | [N3](#n3--用户表名为-resource-而非-user) | 用户数据存于 `resource` 表，不存在 `user` 表 | 排查注意 | — | 仅影响 SQL 排查 | ⚪ |
@@ -36,9 +36,15 @@ P1、P2 来自上游 ProjeQtOr 自身且都不阻断部署与使用；P1 已在�
 （见 P1「处置记录」）。P3、P4、P5 属于本仓库交付侧：P3 是升级生效性问题，本实例已按方案 1
 （固定不可变 tag）部署并验证生效，而 chart 与 CI 的默认行为未变 —— 新部署仍可能踩到；
 P4 是「PHP 会话不在 PVC 上」、P5 是「`files/` 目录可被 HTTP 直读」，两者均已在镜像 /
-模板 / 入口脚本侧修复，待重建镜像后生效与验证。P6 属本仓库交付侧且**严重度为高**：
+模板 / 入口脚本侧修复。P6 属本仓库交付侧且**严重度为高**：
 它是「数据库尚未初始化」这一全新部署首次启动的必经状态下的致命缺陷（`smrd` 实例即因此白屏），
 已在入口脚本侧修复，并在该实例上实测恢复（建库 357 张表 + `admin/admin` 真实登录通过）。
+
+**P4 / P5 / P6 的镜像重建已完成并验证**：三者的修复随提交 `54d0224` 构建为镜像
+`sha-54d0224` 并滚动更新（`smrd` ns，revision 5）。2026-10-15 的复核确认容器内
+`/usr/local/bin/docker-entrypoint.sh` 的 sha256 与仓库版本逐字节一致、应用与数据库功能正常、
+P4 会话已落 PVC、P5 敏感子目录全部 403、P6 在「空 `files/` 卷」这一原始触发条件下不再白屏
+（证据见 [第 2 节](#2-验证基线)）。
 
 ---
 
@@ -61,6 +67,31 @@ P4 是「PHP 会话不在 PVC 上」、P5 是「`files/` 目录可被 HTTP 直�
 | 自愈逻辑上线 | 本实例以不可变 tag `sha-8a050b3` 滚动更新后，容器内 `PQ_PG_REPAIR=true`，启动日志出现 4 行 `[projeqtor-pg-repair]`（见 P3「处置记录」） |
 | CI 触发范围 | 镜像输入未变更时不触发构建：以纯文档提交实测，该提交**不产生任何 Actions 运行**（按 `head_sha` 查询 `total_count=0`）；对照的前一次工作流自身变更提交正常触发构建（run #5，`Build and push` 步骤 success） |
 | CI `paths` 完整性 | 逐个核对 Dockerfile 的 `COPY` 源（`docker/entrypoint`、`docker/healthz.php`、`docker/pg-repair-*.php`）均在 `docker/**` 之内，无构建上下文输入落在 `paths` 之外 |
+
+### 复核：`sha-54d0224` 上的 P4 / P5 / P6 验证（2026-10-15，ns `smrd`）
+
+P6 的修复随提交 `54d0224` 构建为镜像 `sha-54d0224` 并滚动更新（revision 5）。以下是复核结果，
+P4 / P5 的「待重建镜像生效」也在此一并结清。
+
+| 验证项 | 结果 |
+|---|---|
+| 镜像与提交对应 | Deployment `smrd/projeqtor` revision 5 使用不可变 tag `sha-54d0224`（= 提交 `54d0224`）；运行 imageID `…@sha256:9f676658…` |
+| 入口脚本一致性 | 容器内 `/usr/local/bin/docker-entrypoint.sh` 的 sha256 `a4affa00cb43606f…` 与仓库版本**逐字节一致** |
+| 入口脚本幂等 | 启动日志为 `Using existing …/parameters.php`，**未**出现 `Repaired …`（既有文件已含 `logFile`/`logLevel`，未重复追加） |
+| 应用可用性 | `/` 与 `/index.php` = 200 / 3812 B；`/view/login.php` = 200 / 17891 B —— 不再有 0 字节白屏 |
+| 登录 | AES 全链路 `admin`/`admin` → `Login accepted` / `validated=OK`；`/view/main.php` = 741 304 B（`menuBar` 存在） |
+| 数据库 | `parameter` 表存在、`tables=357`、`dbVersion=V13.1.1`、`resource` 表含 `admin` |
+| P1 自愈 | 启动日志 `[projeqtor-pg-repair] … 0 row(s) realigned` / `done: nothing to repair` |
+| **P4 验证** | `session.save_path = /var/www/html/files/session`；PVC 上已有 7 个 `sess_*` 文件（133 KB）→ 会话真正持久化 |
+| **P5 验证** | `/files/{attach,config,cron,logs,report,import,session}` 均 **403**；`images` / `thumbs` 未被 deny（403 仅为 `Options -Indexes`） |
+| P5 误伤检查 | 报告的 PDF/CSV 经 PHP `readfile()` / `header()` 交付（`view/print.php:742,751`），不经 `/files/report/` 静态 URL；应用源码中无对被禁目录的静态 HTTP 引用 |
+| **P6 验证（空卷）** | 一次性 Pod + **空 `files/` 卷**（不挂 PVC、`PQ_PG_REPAIR=false`）：入口脚本输出 `Generating … from PQ_DB_* environment variables`，生成文件含 `$logFile`/`$logLevel` 且 `php -l` 通过；`/` = 3812 B、`/index.php` = 3812 B、`/view/login.php` = 17891 B —— **原始触发条件下不再白屏** |
+
+> 附带确认（曾一度误判）：`/var/www/` 的 `AllowOverride` 由基镜像的
+> `conf-available/docker-php.conf` 设为 **`All`**，因此 `files/session/.htaccess` 的
+> `Require all denied` 确实生效；P5 的 `zz-projeqtor-files.conf` 对同一目录再次拒绝，
+> 属纵深防御。注意 `grep -r` 默认不跟随符号链接，核对 `conf-enabled/` 下的实际生效配置时
+> 需用 `-R` 或直接查看 `conf-available/` 目标文件。
 
 ---
 
@@ -274,8 +305,8 @@ Pod 重建也不会拉取新镜像 —— 镜像变更静默不生效。
 **严重度**：中（单副本下表现为「升级即全员掉登录」；多副本下 chart 声明的
 RWX 共享能力实际不成立）
 **归属**：本仓库交付侧（镜像 / 入口脚本 / 文档）
-**状态**：🟢 已修复（镜像侧 + 入口脚本，已在本地基镜像实测验证；**待重建镜像并滚动更新，
-以在 k3s 上确认 Pod 重建后登录态保留**）
+**状态**：🟢 已修复并验证（镜像侧 + 入口脚本；2026-10-15 在 `sha-54d0224` 上确认会话文件
+已落在 PVC 的 `files/session/`，见 [第 2 节](#2-验证基线)）
 
 #### 现象
 
@@ -346,7 +377,8 @@ Loaded Configuration File: (none)          # 官方 php 镜像不加载任何 ph
 
 **严重度**：中高（日志文件名可预测 → 未认证即可读取；附件被绕过授权模型）
 **归属**：本仓库交付侧（镜像内缺少 Apache 访问限制）
-**状态**：🟢 已修复（镜像层 Apache 配置；**待重建镜像生效**）
+**状态**：🟢 已修复并验证（镜像层 Apache 配置；2026-10-15 在 `sha-54d0224` 上实测
+`files/{attach,config,cron,logs,report,import,session}` 全部 403，见 [第 2 节](#2-验证基线)）
 
 #### 现象
 
@@ -394,7 +426,8 @@ Loaded Configuration File: (none)          # 官方 php 镜像不加载任何 ph
 
 **严重度**：高（应用完全不可用，且无法自愈）
 **归属**：本仓库交付侧（`docker/docker-entrypoint.sh` 生成的参数文件缺少框架启动必需项）
-**状态**：🟢 已修复（入口脚本补全 + 可原地修复既有部署；本实例已实测恢复）
+**状态**：🟢 已修复并验证（入口脚本补全 + 可原地修复既有部署；2026-10-15 在 `sha-54d0224`
+上以「空 `files/` 卷」复现原始触发条件，不再白屏，见 [第 2 节](#2-验证基线)）
 
 #### 现象
 
@@ -606,6 +639,14 @@ RESULT: LOGIN SUCCESS (admin/admin)
   （正常启动时打印三条 `N row(s) realigned` 与最终结论）。
 * **确认镜像是否真的更新**：比对 `kubectl -n projeqtor get pod -o jsonpath='{.status.containerStatuses[0].imageID}'`
   与 ghcr 上该 tag 的 digest；注意 [P3](#p3--可变版本-tag--ifnotpresent导致镜像更新不生效)。
+* **核对镜像内的入口脚本版本**：`sha256sum /usr/local/bin/docker-entrypoint.sh` 与仓库
+  `docker/docker-entrypoint.sh` 对比（本实例随提交 `54d0224` 构建，值为 `a4affa00cb43606f…`）。
+  只改 `values.image.tag` 即可交付入口脚本类修复，无需改 chart。
+* **核对「实际生效」的 Apache 配置**：`grep -r` 默认**不跟随**符号链接，而
+  `/etc/apache2/conf-enabled/*` 多是指向 `conf-available/` 的符号链接 —— 直接 `grep -r`
+  会漏掉它们（曾因此误判 `/var/www/` 的 `AllowOverride`）。请用 `grep -R`，或直接查看
+  `conf-available/` 下的目标文件。当前 `/var/www/` 为 `Options -Indexes` + `AllowOverride All`
+  （基镜像 `conf-available/docker-php.conf`），因此 `files/session/.htaccess` 确实生效。
 * **Chart 与数据库的边界**：Chart 不含任何数据库工作负载与镜像（渲染证据见
   [N4](#n4--数据库不在-chart-内--自建-secret-的双键语义)）；本集群数据库为独立
   Deployment `projeqtor-postgres`（PVC `projeqtor-postgres-data`），不属于 Helm release。
@@ -628,10 +669,10 @@ RESULT: LOGIN SUCCESS (admin/admin)
 | 5 | 是否用 MySQL/MariaDB 做一次对照实测（同一套 Chart、同样全新安装，检查 `WITH N ERRORS`） | P1 | 待决定 |
 | 6 | 让自愈逻辑真正生效：等 CI 用新代码重建镜像并完成滚动更新（受 P3 影响） | P1 / P3 | ✅ 已完成（2026-10-14；以 `sha-8a050b3` 滚动更新，启动日志出现 4 行 `[projeqtor-pg-repair]`、`PQ_PG_REPAIR=true`） |
 | 7 | 选择 P3 的处置方式（不可变 tag / `Always` / CI 不覆盖版本 tag） | P3 | ✅ 已完成（2026-10-14；采用方案 1 固定不可变 tag，见 P3「处置记录」） |
-| 8 | 重建镜像并在 k3s 上验证 P4 修复（Pod 重建后登录态保留；多副本下会话跨 Pod 共享） | P4 | 待执行（代码与文档已改、本地基镜像实测通过；需 CI 构建新镜像并更新部署 tag） |
-| 9 | 重建镜像并验证 P5 加固（附件下载、头像/缩略图、日志查看页仍正常；`files/logs` 等目录返回 403） | P5 | 待执行（同上，可与 P4 同一次镜像重建与升级一并验证） |
+| 8 | 重建镜像并在 k3s 上验证 P4 修复（Pod 重建后登录态保留；多副本下会话跨 Pod 共享） | P4 | ✅ 部分完成（2026-10-15；`sha-54d0224` 上确认 `session.save_path` 指向 PVC 且已有 7 个 `sess_*` 文件 → 会话持久化成立。「Pod 重建后登录态保留」与「多副本跨 Pod 共享」需重建/扩副本才能观测，本实例为 `replicaCount=1`，未执行；多副本并发语义限制见 P4「残留注意」） |
+| 9 | 重建镜像并验证 P5 加固（附件下载、头像/缩略图、日志查看页仍正常；`files/logs` 等目录返回 403） | P5 | ✅ 部分完成（2026-10-15；403 矩阵已全部实测通过，未见误伤：报告走 PHP 交付、源码无静态引用、`images`/`thumbs` 未被 deny。UI 级的「附件上传-下载往返、头像显示、管理界面日志查看」未执行 —— 本实例尚无附件与图片数据） |
 | 10 | 在非生产环境验证 `seccompProfile: RuntimeDefault` 下 Apache/PHP 正常（chart 默认已启用） | 安全加固 | 待执行（仅有本地旁证：Docker 默认 seccomp 下一切正常） |
-| 11 | 重建镜像并验证 P6：全新空库部署首次启动不再白屏；既有部署升级后参数文件被原地修复 | P6 | 待执行（代码与文档已改；本地 19/19、真实镜像一次性 Pod 14/14、生产实例端到端手工验证均已通过） |
+| 11 | 重建镜像并验证 P6：全新空库部署首次启动不再白屏；既有部署升级后参数文件被原地修复 | P6 | ✅ 已完成（2026-10-15；`sha-54d0224` 上以「空 `files/` 卷」复现原始触发条件，`/` 与 `/index.php` 均 3812 B、登录页 17891 B，不再白屏；入口脚本幂等、启动日志未重复追加。另：镜像哈希与仓库版本逐字节一致。**既有部署的原地修复分支未直接观测** —— 本实例的参数文件在升级前已由应用自身回写补齐，入口脚本因此走「Using existing」而非「Repaired」；该分支已在本地 19/19 与真实镜像一次性 Pod 14/14 用例中覆盖） |
 
 ---
 
@@ -646,3 +687,5 @@ RESULT: LOGIN SUCCESS (admin/admin)
 | 2026-10-14 | 新增 [P4](#p4--php-会话不在-pvc-上多副本不共享pod-重建掉登录)：实测基镜像确认 `session.save_path` 为空、会话落在容器 `/tmp`（不在 PVC）；修复为镜像 ini 指向 `files/session` + 入口脚本创建该目录并写入 `.htaccess`；修正 `values.yaml` / chart README / 根 README 共 4 处错误的「会话在 Pod 间共享」说法；摘要表、总体结论、待决事项新增相应条目 |
 | 2026-10-14 | 安全加固：新增 [P5](#p5--files-目录可被-http-直读日志未认证可读附件绕过下载令牌) 并修复（镜像内 Apache 对 `attach/config/cron/logs/report/import/session` 设 `Require all denied`，保留 `images`、`thumbs`）；工作流补顶层最小权限（`contents: read` + detect job 的 `packages: read`）；关闭应用 Pod 与 CronJob 的 `automountServiceAccountToken`；`podSecurityContext` 增加 `seccompProfile: RuntimeDefault`；chart README 增加「口令会落到哪些地方（安全提示）」；`.gitignore` 增加根目录 `/*values*.yaml`、`/*secret*.yaml` 防误提交；Chart 版本 `0.1.0` → `0.2.0` |
 | 2026-10-14 | 新增 [P6](#p6--数据库未初始化时入口脚本生成的-parametersphp-不完整全站-0-字节白屏)（`smrd` 实例白屏根因）并修复：`docker/docker-entrypoint.sh` 生成的 `parameters.php` 补齐上游向导必填的 `$logFile` / `$logLevel`（支持 `PQ_LOG_FILE` / `PQ_LOG_LEVEL` 覆盖），并新增对既有残缺参数文件的幂等原地修复；更正第 5 节「首次安装触发方式」的错误描述（实为 `admin`/`admin` 登录触发 `db/maintenance.php`）并补充「200 + 0 字节」白屏判据；chart README / NOTES 补充首次启动步骤与日志参数；Chart 版本 `0.2.0` → `0.2.1` |
+| 2026-10-15 | 复核 `sha-54d0224`（= 提交 `54d0224`）并结清 P4 / P5 / P6 的「待重建镜像生效」：容器内入口脚本 sha256 与仓库版本逐字节一致；`/` 3812 B 无白屏；`admin/admin` 真实登录通过（`/view/main.php` 741 304 B）；`tables=357` / `dbVersion=V13.1.1`；会话落 PVC（7 个 `sess_*`，133 KB）；`files/{attach,config,cron,logs,report,import,session}` 全部 403 且未见误伤；以「空 `files/` 卷」一次性 Pod 复现 P6 原始触发条件，确认不再白屏。摘要表 / 总体结论 / P4·P5·P6 状态 / 第 2 节复核表 / 待决事项 8·9·11 同步更新 |
+| 2026-10-15 | 更正上一轮自身的一处误判：`/var/www/` 的 `AllowOverride` 由基镜像 `conf-available/docker-php.conf` 设为 **`All`**，因此 `files/session/.htaccess` 的 `Require all denied` 确实生效 —— 此前误判为 `None` 是 `grep -r` 默认不跟随 `conf-enabled/` 符号链接所致。故**未**修改 chart README 与 P4 章节中关于 `.htaccess` 的措辞（原措辞正确），仅在第 2 节补记该注意事项 |
